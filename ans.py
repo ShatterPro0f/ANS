@@ -3032,12 +3032,25 @@ class ANSWindow(QtWidgets.QMainWindow):
         model_layout = QtWidgets.QHBoxLayout()
         model_label = QtWidgets.QLabel("Model:")
         self.model_combo = QtWidgets.QComboBox()
-        self.model_combo.addItem("gemma3:12b")
-        self.model_combo.addItem("llama2")
-        self.model_combo.addItem("mistral")
-        self.model_combo.setCurrentText("gemma3:12b")
+        
+        # Auto-detect installed models from Ollama
+        self._populate_ollama_models()
+        
+        # Set default model if available
+        if self.model_combo.findText("gemma3:12b") >= 0:
+            self.model_combo.setCurrentText("gemma3:12b")
+        elif self.model_combo.count() > 0:
+            self.model_combo.setCurrentIndex(0)
+        
         model_layout.addWidget(model_label)
         model_layout.addWidget(self.model_combo)
+        
+        # Add refresh button to re-scan Ollama models
+        refresh_models_btn = QtWidgets.QPushButton("Refresh Models")
+        refresh_models_btn.setMaximumWidth(120)
+        refresh_models_btn.clicked.connect(self._refresh_ollama_models)
+        model_layout.addWidget(refresh_models_btn)
+        
         model_layout.addStretch()
         llm_layout.addLayout(model_layout)
         
@@ -3240,6 +3253,100 @@ class ANSWindow(QtWidgets.QMainWindow):
         dialog.setText(about_text)
         dialog.setIcon(QtWidgets.QMessageBox.Information)
         dialog.exec_()
+    
+    def _populate_ollama_models(self):
+        """Populate model combo box with installed Ollama models."""
+        models = self._get_available_models()
+        
+        self.model_combo.clear()
+        
+        if models:
+            for model in sorted(models):
+                self.model_combo.addItem(model)
+        else:
+            # Add default models as fallback if no models are detected
+            self.model_combo.addItem("gemma3:12b")
+            self.model_combo.addItem("llama2")
+            self.model_combo.addItem("mistral")
+    
+    def _refresh_ollama_models(self):
+        """Refresh the list of available Ollama models."""
+        self._populate_ollama_models()
+        if self.current_project:
+            self.log_update.emit("Ollama models refreshed")
+        
+        # Show notification to user
+        models_count = self.model_combo.count()
+        message = f"Found {models_count} model(s) installed in Ollama"
+        if models_count == 0:
+            message = "No models found. Please install a model in Ollama first."
+        
+        QtWidgets.QMessageBox.information(self, "Models Refreshed", message)
+    
+    def _get_available_models(self):
+        """Get list of available models from Ollama.
+        
+        Returns:
+            list: Sorted list of available model names
+        """
+        try:
+            # Use ollama client to list available models
+            if hasattr(self, 'client') and self.client:
+                response = self.client.list()
+                
+                # Extract model names from response
+                models = []
+                if hasattr(response, 'models'):
+                    # If response has models attribute (ollama.Response object)
+                    for model in response.models:
+                        # Try to get model name from various attributes
+                        model_name = None
+                        
+                        # Try 'name' attribute first
+                        if hasattr(model, 'name'):
+                            model_name = model.name  # type: ignore
+                        # Try extracting from string representation
+                        elif hasattr(model, 'model'):
+                            model_name = model.model  # type: ignore
+                        else:
+                            # Parse from string representation
+                            model_str = str(model)
+                            if "model='" in model_str:
+                                # Extract model name from model='xxx' pattern
+                                start = model_str.find("model='") + 7
+                                end = model_str.find("'", start)
+                                if start > 6 and end > start:
+                                    model_name = model_str[start:end]
+                        
+                        if model_name and model_name not in models:
+                            models.append(model_name)
+                
+                elif isinstance(response, dict) and 'models' in response:
+                    # If response is a dict with models key
+                    for model_entry in response['models']:
+                        if isinstance(model_entry, dict) and 'name' in model_entry:
+                            model_name = model_entry['name']
+                            if model_name not in models:
+                                models.append(model_name)
+                        else:
+                            model_str = str(model_entry)
+                            if model_str not in models:
+                                models.append(model_str)
+                
+                elif isinstance(response, list):
+                    # If response is directly a list
+                    for item in response:
+                        model_name = str(item)
+                        if model_name not in models:
+                            models.append(model_name)
+                
+                if models:
+                    return sorted(models)
+        except Exception as e:
+            print(f"Error detecting Ollama models: {e}")
+        
+        # Return empty list if detection fails
+        return []
     
     def _load_settings(self):
         """Load application settings from config file."""
