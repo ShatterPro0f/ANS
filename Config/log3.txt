@@ -1,9 +1,0 @@
-2025-11-21 02:24:42 - Application initialized
-2025-11-21 02:24:50 - User initiated project load: Test 1
-2025-11-21 02:24:50 - Loading project: Test 1
-2025-11-21 02:24:50 - Planning displays populated with existing project data
-2025-11-21 02:24:50 - Project loaded successfully: Test 1 - session persistence enabled
-2025-11-21 02:24:50 - Project 'Test 1' loaded successfully - session persistence active
-2025-11-21 02:24:50 - Project 'Test 1' loaded into session
-2025-11-21 02:24:53 - LLM connection successful (gemma3:12b)
-2025-11-21 02:24:53 - LLM connection successful (gemma3:12b)
