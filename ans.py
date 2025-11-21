@@ -4054,25 +4054,34 @@ SectionsPerChapter: {self.sections_spinbox.value()}
     
     def _on_new_synopsis(self, refined_synopsis_text):
         """Handle new_synopsis signal from refinement. Update Planning tab and switch to it."""
-        # Update Planning tab synopsis display with incremental updates
+        # Calculate new content once based on main widget's state
+        # This ensures consistency between main and expanded windows
+        main_current_text = ""
+        main_current_length = 0
         if hasattr(self, 'planning_synopsis_display'):
-            # Get current text length
-            current_text = self.planning_synopsis_display.toPlainText()
-            current_length = len(current_text)
-            new_length = len(refined_synopsis_text)
-            
-            # Handle display clear first (refinement_start signal clears display)
-            if new_length == 0 and current_length > 0:
-                # Display was cleared, this is a new refinement starting
+            main_current_text = self.planning_synopsis_display.toPlainText()
+            main_current_length = len(main_current_text)
+        
+        new_length = len(refined_synopsis_text)
+        
+        # Handle display clear first (refinement_start signal clears display)
+        if new_length == 0 and main_current_length > 0:
+            # Display was cleared, this is a new refinement starting
+            if hasattr(self, 'planning_synopsis_display'):
                 self.planning_synopsis_display.clear()
-            elif new_length > current_length:
-                # New text has been added - stream it in
+            if 'planning_synopsis_display' in self.expanded_text_widgets:
+                self.expanded_text_widgets['planning_synopsis_display'].clear()
+        elif new_length > main_current_length:
+            # New text has been added - calculate new part once
+            new_part = refined_synopsis_text[main_current_length:]
+            
+            # Update main widget
+            if hasattr(self, 'planning_synopsis_display'):
                 # Check if user is at the bottom before appending
                 scrollbar = self.planning_synopsis_display.verticalScrollBar()
                 is_at_bottom = scrollbar is not None and scrollbar.value() == scrollbar.maximum()
                 
                 # Append only the new part to preserve scroll position
-                new_part = refined_synopsis_text[current_length:]
                 self.planning_synopsis_display.insertPlainText(new_part)
                 
                 # Only auto-scroll if user was already at the bottom
@@ -4080,20 +4089,10 @@ SectionsPerChapter: {self.sections_spinbox.value()}
                     cursor = self.planning_synopsis_display.textCursor()
                     cursor.movePosition(cursor.MoveOperation.End)
                     self.planning_synopsis_display.setTextCursor(cursor)
-        
-        # Also update expanded window if it's open
-        if 'planning_synopsis_display' in self.expanded_text_widgets:
-            expanded_text = self.expanded_text_widgets['planning_synopsis_display']
-            current_text = expanded_text.toPlainText()
-            current_length = len(current_text)
-            new_length = len(refined_synopsis_text)
             
-            # Handle display clear first
-            if new_length == 0 and current_length > 0:
-                expanded_text.clear()
-            elif new_length > current_length:
-                # Stream new content
-                new_part = refined_synopsis_text[current_length:]
+            # Also update expanded window if it's open with SAME new_part
+            if 'planning_synopsis_display' in self.expanded_text_widgets:
+                expanded_text = self.expanded_text_widgets['planning_synopsis_display']
                 expanded_text.insertPlainText(new_part)
                 # Auto-scroll to bottom
                 cursor = expanded_text.textCursor()
@@ -4116,19 +4115,24 @@ SectionsPerChapter: {self.sections_spinbox.value()}
     
     def _on_new_outline(self, outline_text):
         """Handle new_outline signal from outline generation/refinement. Update Planning tab outline display."""
-        # Update Planning tab outline display with incremental updates
+        # Calculate new content once based on complete outline_text
+        # This ensures consistency between main and expanded windows
+        main_current_text = ""
         if hasattr(self, 'outline_display'):
-            # Get current text length
-            current_text = self.outline_display.toPlainText()
+            main_current_text = self.outline_display.toPlainText()
+        
+        # Only update if new text has been added
+        if len(outline_text) > len(main_current_text):
+            # Calculate new part once
+            new_part = outline_text[len(main_current_text):]
             
-            # Only update if new text has been added
-            if len(outline_text) > len(current_text):
+            # Update main widget
+            if hasattr(self, 'outline_display'):
                 # Check if user is at the bottom before appending
                 scrollbar = self.outline_display.verticalScrollBar()
                 is_at_bottom = scrollbar is not None and scrollbar.value() == scrollbar.maximum()
                 
                 # Append only the new part to preserve scroll position
-                new_part = outline_text[len(current_text):]
                 self.outline_display.insertPlainText(new_part)
                 
                 # Only auto-scroll if user was already at the bottom
@@ -4136,13 +4140,10 @@ SectionsPerChapter: {self.sections_spinbox.value()}
                     cursor = self.outline_display.textCursor()
                     cursor.movePosition(cursor.MoveOperation.End)
                     self.outline_display.setTextCursor(cursor)
-        
-        # Also update expanded window if it's open
-        if 'outline_display' in self.expanded_text_widgets:
-            expanded_text = self.expanded_text_widgets['outline_display']
-            current_text = expanded_text.toPlainText()
-            if len(outline_text) > len(current_text):
-                new_part = outline_text[len(current_text):]
+            
+            # Also update expanded window if it's open with the SAME new_part
+            if 'outline_display' in self.expanded_text_widgets:
+                expanded_text = self.expanded_text_widgets['outline_display']
                 expanded_text.insertPlainText(new_part)
                 # Auto-scroll to bottom
                 cursor = expanded_text.textCursor()
