@@ -9,6 +9,13 @@ from typing import TYPE_CHECKING
 import ollama
 from PyQt5 import QtWidgets, QtCore, QtGui
 
+# Optional imports for frameless window support
+try:
+    from qframelesswindow import FramelessMainWindow
+    HAS_FRAMELESS_WINDOW = True
+except ImportError:
+    HAS_FRAMELESS_WINDOW = False
+
 # Optional imports for export functionality
 try:
     from docx import Document
@@ -2591,8 +2598,211 @@ class BackgroundThread(QtCore.QThread):
             self.log_update.emit(f"Chapter research loop error: {str(e)}")
 
 
-class ANSWindow(QtWidgets.QMainWindow):
-    """Main window for the Automated Novel System (ANS) desktop application."""
+class CustomTitleBar(QtWidgets.QWidget):
+    """Custom title bar for frameless window with dark mode support and Windows 10 classic icons."""
+    
+    def __init__(self, parent_window, window_title="", light_logo_path="", dark_logo_path=""):
+        super().__init__()
+        self.parent_window = parent_window
+        self.is_dark_mode = False
+        self.drag_start_pos = None
+        self.light_logo_path = light_logo_path
+        self.dark_logo_path = dark_logo_path
+        
+        # Create layout with proper spacing and alignment
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(8, 0, 0, 0)  # Left padding for icon spacing
+        layout.setSpacing(4)
+        
+        # Window icon label (will be updated in set_dark_mode)
+        self.icon_label = QtWidgets.QLabel()
+        self.icon_label.setFixedSize(24, 24)
+        layout.addWidget(self.icon_label)
+        
+        # Window title label
+        self.title_label = QtWidgets.QLabel(window_title)
+        self.title_label.setStyleSheet("color: #000000; font-weight: bold; margin: 0px 4px;")
+        layout.addWidget(self.title_label, 1)
+        
+        # Spacer to push buttons to the right
+        spacer = QtWidgets.QSpacerItem(40, 20, QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
+        layout.addItem(spacer)
+        
+        # Minimize button with Windows 10 icon
+        self.minimize_btn = self._create_window_button("_", "minimize")
+        self.minimize_btn.clicked.connect(self.minimize_window)
+        layout.addWidget(self.minimize_btn)
+        
+        # Maximize button with Windows 10 icon
+        self.maximize_btn = self._create_window_button("□", "maximize")
+        self.maximize_btn.clicked.connect(self.maximize_window)
+        layout.addWidget(self.maximize_btn)
+        
+        # Close button with Windows 10 icon
+        self.close_btn = self._create_window_button("✕", "close")
+        self.close_btn.clicked.connect(self.close_window)
+        layout.addWidget(self.close_btn)
+        
+        # Set height and background
+        self.setFixedHeight(32)
+        self.set_dark_mode(False)
+    
+    def _create_window_button(self, text, button_type):
+        """Create a window control button with Windows 10 styling."""
+        btn = QtWidgets.QPushButton(text)
+        btn.setFixedSize(40, 32)
+        btn.setFlat(True)
+        # Different font sizing for different button types
+        if button_type == "minimize":
+            font_size = "14px"  # Smaller for minimize
+            padding = "2px 0px 0px 0px"  # Lift up the minimize icon
+        elif button_type == "maximize":
+            font_size = "16px"  # Larger for maximize (matches close)
+            padding = "0px"
+        else:  # close button
+            font_size = "16px"
+            padding = "0px"
+        
+        btn.setStyleSheet(
+            f"QPushButton {{ background-color: transparent; border: none; color: #000000; font-size: {font_size}; font-weight: normal; padding: {padding}; }}"
+            "QPushButton:hover { background-color: rgba(0, 0, 0, 0.06); }"
+            "QPushButton:pressed { background-color: rgba(0, 0, 0, 0.12); }"
+        )
+        return btn
+    
+    def set_dark_mode(self, is_dark: bool):
+        """Update title bar colors and logo for dark/light mode."""
+        self.is_dark_mode = is_dark
+        
+        # Update logo
+        logo_path = self.dark_logo_path if is_dark else self.light_logo_path
+        if logo_path and os.path.exists(logo_path):
+            pixmap = QtGui.QPixmap(logo_path).scaledToHeight(24)
+            self.icon_label.setPixmap(pixmap)
+        
+        if is_dark:
+            bg_color = "#1e1e1e"
+            text_color = "#e0e0e0"
+            self.setStyleSheet(f"background-color: {bg_color};")
+            self.title_label.setStyleSheet(f"color: {text_color}; font-weight: bold; margin: 0px 4px;")
+            
+            # Update button styles for dark mode
+            self._update_button_style(self.minimize_btn, text_color, is_dark, button_type="minimize")
+            self._update_button_style(self.maximize_btn, text_color, is_dark, button_type="maximize")
+            self._update_button_style(self.close_btn, text_color, is_dark, close_button=True)
+        else:
+            bg_color = "#ffffff"
+            text_color = "#000000"
+            self.setStyleSheet(f"background-color: {bg_color}; border: none;")
+            self.title_label.setStyleSheet(f"color: {text_color}; font-weight: bold; margin: 0px 4px; background-color: transparent;")
+            
+            # Update button styles for light mode
+            self._update_button_style(self.minimize_btn, text_color, is_dark, button_type="minimize")
+            self._update_button_style(self.maximize_btn, text_color, is_dark, button_type="maximize")
+            self._update_button_style(self.close_btn, text_color, is_dark, close_button=True)
+    
+    def _update_button_style(self, button, text_color, is_dark, close_button=False, button_type=None):
+        """Update button styling for light or dark mode."""
+        # Determine sizing based on button type
+        if button_type == "minimize":
+            font_size = "14px"
+            padding = "2px 0px 0px 0px"
+        elif button_type == "maximize":
+            font_size = "16px"
+            padding = "0px"
+        else:
+            font_size = "16px"
+            padding = "0px"
+        
+        if close_button:
+            button.setStyleSheet(
+                f"QPushButton {{ background-color: transparent; border: none; color: {text_color}; font-size: {font_size}; font-weight: normal; padding: {padding}; }}"
+                f"QPushButton:hover {{ background-color: #e81123; color: white; }}"
+                f"QPushButton:pressed {{ background-color: #c41410; color: white; }}"
+            )
+        else:
+            if is_dark:
+                button.setStyleSheet(
+                    f"QPushButton {{ background-color: transparent; border: none; color: {text_color}; font-size: {font_size}; font-weight: normal; padding: {padding}; }}"
+                    f"QPushButton:hover {{ background-color: rgba(255, 255, 255, 0.08); }}"
+                    f"QPushButton:pressed {{ background-color: rgba(255, 255, 255, 0.12); }}"
+                )
+            else:
+                button.setStyleSheet(
+                    f"QPushButton {{ background-color: transparent; border: none; color: {text_color}; font-size: {font_size}; font-weight: normal; padding: {padding}; }}"
+                    f"QPushButton:hover {{ background-color: rgba(0, 0, 0, 0.06); }}"
+                    f"QPushButton:pressed {{ background-color: rgba(0, 0, 0, 0.12); }}"
+                )
+    
+    def mousePressEvent(self, event):
+        """Enable window dragging from title bar."""
+        if event.button() == 1:  # Left button
+            if HAS_FRAMELESS_WINDOW:
+                # For FramelessMainWindow, use the library's system move helper
+                # Import the helper from the library
+                try:
+                    from qframelesswindow.utils import startSystemMove
+                    startSystemMove(self.parent_window, event)
+                    event.accept()
+                except ImportError:
+                    # Fallback if import fails
+                    self.drag_start_pos = event.globalPos() - self.parent_window.frameGeometry().topLeft()
+                    event.accept()
+            else:
+                # For standard QMainWindow, use manual dragging
+                self.drag_start_pos = event.globalPos() - self.parent_window.frameGeometry().topLeft()
+                event.accept()
+    
+    def mouseMoveEvent(self, event):
+        """Handle window dragging.
+        
+        When using FramelessMainWindow from qframelesswindow library:
+        - startSystemMove() in mousePressEvent handles all dragging and snap detection
+        - We don't need manual handling here
+        
+        When using standard QMainWindow:
+        - Manual dragging is implemented here
+        """
+        if not HAS_FRAMELESS_WINDOW and self.drag_start_pos and event.buttons() & 1:
+            global_pos = event.globalPos()
+            self.parent_window.move(global_pos - self.drag_start_pos)
+            event.accept()
+    
+    def mouseDoubleClickEvent(self, event):
+        """Toggle maximize on title bar double-click."""
+        self.maximize_window()
+    
+    def minimize_window(self):
+        """Minimize the window."""
+        self.parent_window.showMinimized()
+    
+    def maximize_window(self):
+        """Toggle maximize/restore window."""
+        if self.parent_window.isMaximized():
+            self.parent_window.showNormal()
+            self.maximize_btn.setText("□")
+        else:
+            self.parent_window.showMaximized()
+            self.maximize_btn.setText("▢")
+    
+    def close_window(self):
+        """Close the window."""
+        self.parent_window.close()
+
+
+# Set up base class for ANSWindow based on library availability
+if HAS_FRAMELESS_WINDOW:
+    from qframelesswindow import FramelessMainWindow as _ANSWindowBase  # type: ignore
+else:
+    _ANSWindowBase = QtWidgets.QMainWindow  # type: ignore
+
+
+class ANSWindow(_ANSWindowBase):  # type: ignore
+    """Main window for the Automated Novel System (ANS) desktop application.
+    
+    Uses FramelessMainWindow from qframelesswindow library for professional frameless
+    window with automatic Windows Aero snap support. Falls back to QMainWindow if unavailable.
+    """
     
     # Signals
     start_signal = QtCore.pyqtSignal(str)
@@ -2621,6 +2831,9 @@ class ANSWindow(QtWidgets.QMainWindow):
         
         # Store references to expanded text widgets for streaming updates
         self.expanded_text_widgets = {}
+        
+        # Store references to expanded windows for proper cleanup
+        self.expanded_windows_refs = {}
         
         # LLM connection status
         self.llm_connected = False
@@ -2684,6 +2897,26 @@ class ANSWindow(QtWidgets.QMainWindow):
         
         # Set window properties
         self.setWindowTitle("Automated Novel System")
+        
+        # Note: Frameless window is applied via setWindowFlags in setupUI after show()
+        # This enables proper frameless window rendering
+        
+        # Set window icon (logo) - use appropriate logo based on dark mode setting
+        is_dark_mode = False
+        try:
+            config_path = os.path.join('Config', 'app_settings.txt')
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if 'DarkMode:' in line:
+                            is_dark_mode = line.split('DarkMode:')[1].strip() == 'True'
+                            break
+        except Exception:
+            is_dark_mode = False
+        
+        self._set_window_icon(is_dark_mode)
+        # Note: _set_dark_title_bar is now a no-op for OS title bar; custom title bar handles dark mode
+        
         self.resize(1200, 800)
         self.setWindowState(self.windowState() | QtCore.Qt.WindowMaximized if False else self.windowState())
         
@@ -2696,9 +2929,35 @@ class ANSWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central_widget)
         
         main_layout = QtWidgets.QVBoxLayout(central_widget)
+        main_layout.setSpacing(0)
+        
+        # Create custom title bar
+        light_logo_path = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+        dark_logo_path = os.path.join(os.path.dirname(__file__), "assets", "Logo_Dark.png")
+        self.custom_title_bar = CustomTitleBar(self, "Automated Novel System", light_logo_path, dark_logo_path)
+        self.custom_title_bar.set_dark_mode(is_dark_mode)
+        
+        # Install title bar appropriately based on window type
+        if HAS_FRAMELESS_WINDOW:
+            # Use library's built-in title bar installation for proper snap handling
+            self.setTitleBar(self.custom_title_bar)
+            # Keep reference as title_bar for compatibility
+            self.title_bar = self.titleBar
+            # When using FramelessMainWindow, title bar is managed by library (not in central widget)
+            # Add top margin to central widget layout to account for title bar height (32px)
+            main_layout.setContentsMargins(0, 32, 0, 0)
+        else:
+            # Fall back to adding it to main layout for standard QMainWindow
+            main_layout.setContentsMargins(0, 0, 0, 0)
+            main_layout.addWidget(self.custom_title_bar, 0)  # Add with stretch factor 0 (fixed size)
+            self.title_bar = self.custom_title_bar
+        
+        # Store dark mode state for later updates
+        self.is_dark_mode = is_dark_mode
         
         # Create tab widget
         self.tabs = QtWidgets.QTabWidget()
+        main_layout.addWidget(self.tabs, 1)  # Add with stretch factor 1 to fill remaining space
         
         # Create tabs
         initialization_tab = self._create_initialization_tab()
@@ -2717,16 +2976,50 @@ class ANSWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(logs_tab, "Logs")
         self.tabs.addTab(dashboard_tab, "Dashboard")
         self.tabs.addTab(settings_tab, "Settings")
-        
-        # Add tab widget to main layout
-        main_layout.addWidget(self.tabs)
-        
-        central_widget.setLayout(main_layout)
     
     def _create_initialization_tab(self):
         """Create the Initialization tab with project creation and loading UI."""
         tab = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(tab)
+        
+        # ===== Logo Header Section =====
+        logo_header_layout = QtWidgets.QHBoxLayout()
+        logo_header_layout.addStretch()
+        
+        # Add header image (use dark mode header if dark mode is enabled)
+        # Check if dark mode is enabled by looking at saved settings or using default
+        is_dark_mode = False
+        try:
+            config_path = os.path.join('Config', 'app_settings.txt')
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if 'DarkMode:' in line:
+                            is_dark_mode = line.split('DarkMode:')[1].strip() == 'True'
+                            break
+        except Exception:
+            is_dark_mode = False
+        
+        if is_dark_mode:
+            header_path = os.path.join(os.path.dirname(__file__), "assets", "Header_Dark.png")
+        else:
+            header_path = os.path.join(os.path.dirname(__file__), "assets", "header.png")
+        
+        if os.path.exists(header_path):
+            self.init_header_label = QtWidgets.QLabel()
+            pixmap = QtGui.QPixmap(header_path)
+            pixmap = pixmap.scaledToHeight(150, QtCore.Qt.TransformationMode.SmoothTransformation)
+            self.init_header_label.setPixmap(pixmap)
+            logo_header_layout.addWidget(self.init_header_label, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
+        
+        logo_header_layout.addStretch()
+        layout.addLayout(logo_header_layout)
+        
+        # Add separator line
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.HLine)
+        separator.setFrameShadow(QtWidgets.QFrame.Sunken)
+        layout.addWidget(separator)
         
         # ===== LLM Status Section =====
         llm_status_layout = QtWidgets.QHBoxLayout()
@@ -3543,9 +3836,21 @@ class ANSWindow(QtWidgets.QMainWindow):
         """Toggle dark mode theme for the application."""
         if state == QtCore.Qt.CheckState.Checked:
             self._apply_dark_mode()
+            self._set_window_icon(True)
+            self._refresh_initialization_header()
+            # Update custom title bar to dark mode
+            if hasattr(self, 'title_bar'):
+                self.title_bar.set_dark_mode(True)
+            self.is_dark_mode = True
             self._save_settings()
         else:
             self._apply_light_mode()
+            self._set_window_icon(False)
+            self._refresh_initialization_header()
+            # Update custom title bar to light mode
+            if hasattr(self, 'title_bar'):
+                self.title_bar.set_dark_mode(False)
+            self.is_dark_mode = False
             self._save_settings()
     
     def _apply_dark_mode(self):
@@ -3554,6 +3859,9 @@ class ANSWindow(QtWidgets.QMainWindow):
         QMainWindow, QDialog, QWidget {
             background-color: #1e1e1e;
             color: #e0e0e0;
+        }
+        QMainWindow {
+            border: 0px solid #1e1e1e;
         }
         QGroupBox {
             color: #e0e0e0;
@@ -3623,6 +3931,51 @@ class ANSWindow(QtWidgets.QMainWindow):
         if app:
             app.setStyleSheet("")  # type: ignore
     
+    def _set_window_icon(self, is_dark_mode):
+        """Set the window icon based on dark mode state."""
+        try:
+            if is_dark_mode:
+                logo_path = os.path.join(os.path.dirname(__file__), "assets", "Logo_Dark.png")
+            else:
+                logo_path = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+            
+            if os.path.exists(logo_path):
+                icon = QtGui.QIcon(logo_path)
+                self.setWindowIcon(icon)
+        except Exception as e:
+            print(f"Error setting window icon: {e}")
+    
+    def _set_dark_title_bar(self, is_dark_mode):
+        """
+        Title bar customization note: With frameless window, custom title bar handles dark mode.
+        This method is kept for backward compatibility but does nothing.
+        """
+        pass
+    
+    def showEvent(self, event):
+        """Handle window show event - ensure title bar is properly displayed."""
+        super().showEvent(event)
+        # Ensure custom title bar is visible and on top (if using FramelessMainWindow)
+        if HAS_FRAMELESS_WINDOW and hasattr(self, 'titleBar'):
+            self.titleBar.raise_()
+    
+    def _refresh_initialization_header(self):
+        """Refresh the header image in the Initialization tab based on dark mode state."""
+        try:
+            if hasattr(self, 'init_header_label') and self.init_header_label:
+                # Determine which header to use based on dark mode
+                if self.dark_mode_checkbox.isChecked():
+                    header_path = os.path.join(os.path.dirname(__file__), "assets", "Header_Dark.png")
+                else:
+                    header_path = os.path.join(os.path.dirname(__file__), "assets", "header.png")
+                
+                if os.path.exists(header_path):
+                    new_pixmap = QtGui.QPixmap(header_path)
+                    new_pixmap = new_pixmap.scaledToHeight(150, QtCore.Qt.TransformationMode.SmoothTransformation)
+                    self.init_header_label.setPixmap(new_pixmap)
+        except Exception as e:
+            print(f"Error refreshing header: {e}")
+    
     def _on_temperature_changed(self, value):
         """Update temperature value label when slider changes."""
         temp_value = value / 100.0
@@ -3653,6 +4006,11 @@ class ANSWindow(QtWidgets.QMainWindow):
         dialog.setText(about_text)
         dialog.setIcon(QtWidgets.QMessageBox.Information)
         dialog.exec_()
+    
+    def closeEvent(self, event):
+        """Save settings when the application closes."""
+        self._save_settings()
+        event.accept()
     
     def _populate_ollama_models(self):
         """Populate model combo box with installed Ollama models."""
@@ -4736,18 +5094,27 @@ SectionsPerChapter: {self.sections_spinbox.value()}
                     self.adjust_timeline_button.setEnabled(False)
     
     def _expand_text_window(self, window_name):
-        """Expand a text window to fill the entire planning tab."""
+        """Expand a text window to floating modeless window for simultaneous viewing."""
         # Get the text display widget
         text_widget = getattr(self, window_name, None)
         if not text_widget:
             return
         
-        # Create a new dialog window for expanded viewing
-        expand_dialog = QtWidgets.QDialog(self)
-        expand_dialog.setWindowTitle(f"Expanded View - {window_name.replace('_', ' ').title()}")
-        expand_dialog.setGeometry(100, 100, 1000, 800)
+        # Check if this window is already open
+        if window_name in self.expanded_text_widgets:
+            # Window already exists, just bring it to focus
+            self.expanded_text_widgets[window_name].raise_()
+            self.expanded_text_widgets[window_name].activateWindow()
+            return
         
-        layout = QtWidgets.QVBoxLayout(expand_dialog)
+        # Create a new MODELESS window (floating, not blocking main window)
+        expand_window = QtWidgets.QMainWindow()
+        expand_window.setWindowTitle(f"Expanded View - {window_name.replace('_', ' ').title()}")
+        expand_window.setGeometry(100, 100, 1000, 800)
+        
+        # Create central widget with layout
+        central_widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(central_widget)
         
         # Create expanded text display
         expanded_text = QtWidgets.QTextEdit()
@@ -4755,22 +5122,34 @@ SectionsPerChapter: {self.sections_spinbox.value()}
         expanded_text.setPlainText(text_widget.toPlainText())
         layout.addWidget(expanded_text)
         
-        # Store reference to expanded text widget for streaming updates
-        self.expanded_text_widgets[window_name] = expanded_text
-        
         # Add close button
         close_btn = QtWidgets.QPushButton("Close")
-        close_btn.clicked.connect(lambda: self._on_expanded_window_close(window_name, expand_dialog))
+        close_btn.setMaximumHeight(35)
+        close_btn.clicked.connect(lambda: self._on_expanded_window_close(window_name, expand_window))
         layout.addWidget(close_btn)
         
-        expand_dialog.setLayout(layout)
-        expand_dialog.exec_()
+        # Set layout and show (modeless - non-blocking)
+        central_widget.setLayout(layout)
+        expand_window.setCentralWidget(central_widget)
+        
+        # Store reference to expanded text widget and window for streaming updates
+        self.expanded_text_widgets[window_name] = expanded_text
+        
+        # Store window reference for proper cleanup
+        if not hasattr(self, 'expanded_windows_refs'):
+            self.expanded_windows_refs = {}
+        self.expanded_windows_refs[window_name] = expand_window
+        
+        # Show the window (modeless - allows main window interaction)
+        expand_window.show()
     
-    def _on_expanded_window_close(self, window_name, dialog):
-        """Handle expanded window close - remove reference and close dialog."""
+    def _on_expanded_window_close(self, window_name, window):
+        """Handle expanded window close - remove reference and close window."""
         if window_name in self.expanded_text_widgets:
             del self.expanded_text_widgets[window_name]
-        dialog.accept()
+        if hasattr(self, 'expanded_windows_refs') and window_name in self.expanded_windows_refs:
+            del self.expanded_windows_refs[window_name]
+        window.close()
         
     def _on_create_project(self):
         """Handle project creation when button is clicked."""

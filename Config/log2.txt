@@ -1,6 +1,2 @@
-2025-11-20 22:33:46 - User initiated project load: Test 1
-2025-11-20 22:33:46 - Loading project: Test 1
-2025-11-20 22:33:46 - Project loaded successfully: Test 1 - session persistence enabled
-2025-11-20 22:33:46 - Project 'Test 1' loaded successfully - session persistence active
-2025-11-20 22:33:54 - LLM connection successful (gemma3:12b)
-2025-11-20 22:34:09 - User requested refinement for: synopsis - Feedback: Change Noachis's last name to Aurora...
+2025-11-21 02:23:25 - Application initialized
+2025-11-21 02:23:36 - LLM connection successful (gemma3:12b)

@@ -21,12 +21,56 @@ This workspace contains a PyQt5-based desktop application for automated novel ge
 
 ### Key Components
 
-#### ANSWindow Class
-The main application window inheriting from QMainWindow with:
+#### ANSWindow Class (UPDATED - November 21, 2025)
+The main application window now uses **FramelessMainWindow** from qframelesswindow library:
+- **Base Class**: `FramelessMainWindow` (when library available) or `QMainWindow` (fallback)
 - Window title: "Automated Novel System"
+- Window icon: Logo from `assets/logo.png` (set via `self.setWindowIcon()`)
 - Default geometry: 1200x800 pixels
 - Tab widget with 7 tabs: Initialization, Novel Idea, Planning, Writing, Logs, Dashboard, Settings
 - Custom signals for inter-component communication
+- **Professional Frameless Window**:
+  - Custom title bar installed via `setTitleBar()` method
+  - Automatic Windows Aero snap support (left/right 50%, corners 25%, top maximize)
+  - All window controls work through library's native event handler
+  - Seamless multi-monitor snap transitions
+  - Dark/light mode switching updates title bar in real-time
+- **Logo Display in Initialization Tab**:
+  - Logo image displayed at top center (80px height) with title and subtitle
+  - Logo file: `assets/logo.png` (256x256px, 1471 bytes)
+  - Title: "Automated Novel System" (18pt bold, dark blue)
+  - Subtitle: "AI-Powered Creative Writing Assistant" (11pt gray)
+  - Separator line below logo header
+  - Creates professional branding appearance
+
+#### CustomTitleBar Class (UPDATED - November 21, 2025)
+Custom title bar widget integrated with qframelesswindow library for Windows Aero snap support:
+- **Purpose**: Provide styled title bar with logo branding and window controls
+- **Integration**: Installed via `FramelessMainWindow.setTitleBar()` for automatic snap handling
+- **Layout**: Horizontal layout with icon (24px), title label, spacer, and 3 control buttons
+- **Size**: Fixed height 32px for proper window layout spacing
+- **Key Features**:
+  - Window icon display scaled from light/dark logo paths
+  - Window title text left-aligned after icon
+  - Spacer automatically pushes buttons to the right
+  - Three control buttons: Minimize (−), Maximize (□/▢), Close (✕)
+  - Dark mode support with real-time color updates
+  - Windows 11 standard button sizing (40x32px)
+  - Red close button on hover (#e81123 hover, #c41410 pressed)
+- **Color Support** (`set_dark_mode(is_dark)`):
+  - Light mode: White background, black text, light gray buttons
+  - Dark mode: #1e1e1e background, #e0e0e0 text, darker buttons
+  - Switches logo to appropriate theme variant
+  - Real-time updates on dark mode toggle
+- **Window Control Methods**:
+  - `minimize_window()`: Calls `self.parent_window.showMinimized()`
+  - `maximize_window()`: Toggles between maximize/restore states
+  - `close_window()`: Calls `self.parent_window.close()`
+- **Mouse Event Handlers**:
+  - `mousePressEvent()`: Initiates window drag from title bar
+  - `mouseMoveEvent()`: Moves window following cursor
+  - `mouseDoubleClickEvent()`: Toggles maximize on double-click
+- **Visual Design**: Hover effects, button state changes, smooth transitions, proper spacing
 
 #### Synopsis System
 The application uses a two-file system for synopsis management to maintain clear separation between initial and refined versions:
@@ -81,6 +125,12 @@ The application supports multiple independent novel projects organized in a `pro
 - Initializes log with timestamp and "Project initialized" message
 - All files use UTF-8 encoding
 
+**Assets Structure (`assets/` folder, created on startup):**
+- `assets/logo.png` - ANS application logo (256x256px, PNG format)
+  - Contains book and gear imagery representing automated creative writing
+  - Used in window icon and Initialization tab header
+  - Dark blue background (#1a2f4d) with darker blue accents (#001f3f)
+
 #### Project Loading System
 The application supports loading and managing existing projects with session persistence:
 
@@ -121,6 +171,45 @@ Used for event communication between components:
 - `log_update(str)` - Log updates (emitted with message, writes to project log.txt)
 - `error_signal(str)` - Error notifications (shows QMessageBox and logs)
 - `test_result_signal(str)` - Test results from background threads
+
+#### CustomTitleBar Class (NEW - Lines 2594-2734)
+Custom frameless window title bar for complete UI control and professional appearance:
+- **Purpose**: Replace OS-level title bar with Qt-rendered widget
+- **Parent Class**: Inherits from QWidget
+- **Layout**: Horizontal layout with icon, title label, spacer, and control buttons
+- **Key Features**:
+  - Window icon display (24px height, scaled from logo)
+  - Window title text (center-aligned)
+  - Spacer to push buttons to right
+  - Three control buttons: Minimize (−), Maximize (□/▢), Close (✕)
+  - Dark mode support with real-time color updates
+  - Windows 11 standard button sizing (36x24px)
+  - Red close button on hover (#e81123 hover, #c41410 pressed, white text)
+- **Initialization** (`__init__(parent_window, title, icon_path)`):
+  - Creates vertical layout for title bar widget
+  - Loads and scales window icon from `icon_path`
+  - Creates buttons with QAction-like appearance
+  - Sets initial colors based on theme
+- **Color Support** (`set_dark_mode(is_dark)`):
+  - Light mode: White background, black text, light gray buttons
+  - Dark mode: #1e1e1e background, #e0e0e0 text, darker buttons
+  - Updates all label and button colors instantly
+  - Called on dark mode toggle for responsive UI
+- **Mouse Event Handlers**:
+  - `mousePressEvent()`: Detects left-click on title bar to initiate drag (stores cursor globalPos)
+  - `mouseMoveEvent()`: Implements window movement when dragging (uses globalPos - startPos)
+  - `mouseDoubleClickEvent()`: Double-click on title bar toggles maximize/restore
+- **Window Control Methods**:
+  - `minimize_window()`: Calls `self.parent_window.showMinimized()`
+  - `maximize_window()`: Toggles between `showMaximized()` and `showNormal()`, updates icon (□ → ▢)
+  - `close_window()`: Calls `self.parent_window.close()`
+- **Button Connections**: All three buttons connected to respective control methods via clicked signal
+- **Visual Design**:
+  - Buttons have hover effects (color changes on hover)
+  - Close button is red on hover (Windows 11 style)
+  - Buttons have pressed effects (darker color when clicked)
+  - Smooth color transitions for visual feedback
+  - 4px button margins for spacing
 
 #### BackgroundThread Class
 Thread for long-running operations (novel generation, processing):
@@ -748,6 +837,8 @@ finally:
 - ✅ Add Writing tab with section approval/refinement workflow (pause/resume complete)
 - ✅ Add progress tracking with milestone notifications (80% threshold complete)
 - ✅ Add final consistency check validation (basic implementation complete)
+- ✅ Implement custom frameless window with professional title bar (complete)
+- ✅ Integrate qframelesswindow library for Windows Aero snap support (complete - November 21, 2025)
 - Add auto-fix logic for consistency issues (parse issues, target refinement, section updates)
 - Add Dashboard with project statistics and completion metrics
 - Implement save/restore of project data
