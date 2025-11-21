@@ -712,9 +712,12 @@ class BackgroundThread(QtCore.QThread):
             return
         
         try:
-            # Collect outline tokens
+            # Stream outline tokens in REAL-TIME for live display updates
             for chunk in outline_stream:
                 try:
+                    # Check for pause
+                    self.wait_while_paused()
+                    
                     # Handle both dict and GenerateResponse object formats
                     token = None
                     
@@ -727,6 +730,9 @@ class BackgroundThread(QtCore.QThread):
                         outline_text += token
                         outline_token_count += 1
                         
+                        # EMIT EVERY TOKEN for live streaming
+                        self.new_outline.emit(outline_text)
+                        
                         # Log every 100 tokens to avoid spam
                         if outline_token_count % 100 == 0:
                             self.log_update.emit(f"[Outline Generation] {outline_token_count} tokens received...")
@@ -735,7 +741,7 @@ class BackgroundThread(QtCore.QThread):
                     self.log_update.emit(f"Warning: Error processing outline chunk: {str(e)}")
                     continue
             
-            # Save outline
+            # Final processing with completed outline
             if outline_text:
                 project_path = parent_window.current_project['path']
                 outline_path = os.path.join(project_path, 'outline.txt')
@@ -747,7 +753,7 @@ class BackgroundThread(QtCore.QThread):
                 outline_word_count = len(outline_text.split())
                 self.log_update.emit(f"Outline generation complete: {outline_word_count} words ({outline_token_count} tokens)")
                 
-                # Emit new_outline signal to update UI
+                # Final emit for consistency
                 self.new_outline.emit(outline_text)
                 
                 # Save progress: outline ready for approval
@@ -950,9 +956,12 @@ class BackgroundThread(QtCore.QThread):
         
         try:
             
-            # Collect character tokens
+            # Stream character tokens in REAL-TIME for live display updates
             for chunk in character_stream:
                 try:
+                    # Check for pause
+                    self.wait_while_paused()
+                    
                     # Handle both dict and GenerateResponse object formats
                     token = None
                     
@@ -965,6 +974,9 @@ class BackgroundThread(QtCore.QThread):
                         characters_json += token
                         character_token_count += 1
                         
+                        # EMIT EVERY TOKEN for live streaming
+                        self.new_characters.emit(characters_json)
+                        
                         # Log every 100 tokens to avoid spam
                         if character_token_count % 100 == 0:
                             self.log_update.emit(f"[Character Generation] {character_token_count} tokens received...")
@@ -973,7 +985,7 @@ class BackgroundThread(QtCore.QThread):
                     self.log_update.emit(f"Warning: Error processing character chunk: {str(e)}")
                     continue
             
-            # Save characters to file
+            # Final processing with completed characters
             if characters_json:
                 characters_path = os.path.join(project_path, 'characters.txt')
                 with open(characters_path, 'w', encoding='utf-8') as f:
@@ -984,7 +996,7 @@ class BackgroundThread(QtCore.QThread):
                 character_word_count = len(characters_json.split())
                 self.log_update.emit(f"Character generation complete: {character_word_count} words ({character_token_count} tokens)")
                 
-                # Emit new_characters signal to update UI
+                # Final emit for consistency
                 self.new_characters.emit(characters_json)
                 
                 # Save progress: characters ready for approval
@@ -1171,9 +1183,12 @@ class BackgroundThread(QtCore.QThread):
         
         try:
             
-            # Collect world tokens
+            # Stream world tokens in REAL-TIME for live display updates
             for chunk in world_stream:
                 try:
+                    # Check for pause
+                    self.wait_while_paused()
+                    
                     # Handle both dict and GenerateResponse object formats
                     token = None
                     
@@ -1186,6 +1201,9 @@ class BackgroundThread(QtCore.QThread):
                         world_json += token
                         world_token_count += 1
                         
+                        # EMIT EVERY TOKEN for live streaming
+                        self.new_world.emit(world_json)
+                        
                         # Log every 100 tokens to avoid spam
                         if world_token_count % 100 == 0:
                             self.log_update.emit(f"[World Generation] {world_token_count} tokens received...")
@@ -1194,7 +1212,7 @@ class BackgroundThread(QtCore.QThread):
                     self.log_update.emit(f"Warning: Error processing world chunk: {str(e)}")
                     continue
             
-            # Save world to file
+            # Final processing with completed world
             if world_json:
                 world_path = os.path.join(project_path, 'world.txt')
                 with open(world_path, 'w', encoding='utf-8') as f:
@@ -1205,7 +1223,7 @@ class BackgroundThread(QtCore.QThread):
                 world_word_count = len(world_json.split())
                 self.log_update.emit(f"World generation complete: {world_word_count} words ({world_token_count} tokens)")
                 
-                # Emit new_world signal to update UI
+                # Final emit for consistency
                 self.new_world.emit(world_json)
                 
                 # Save progress: world ready for approval
@@ -1400,9 +1418,12 @@ class BackgroundThread(QtCore.QThread):
         
         try:
             
-            # Collect timeline tokens
+            # Stream timeline tokens in REAL-TIME for live display updates
             for chunk in timeline_stream:
                 try:
+                    # Check for pause
+                    self.wait_while_paused()
+                    
                     # Handle both dict and GenerateResponse object formats
                     token = None
                     
@@ -1415,6 +1436,9 @@ class BackgroundThread(QtCore.QThread):
                         timeline_text += token
                         timeline_token_count += 1
                         
+                        # EMIT EVERY TOKEN for live streaming
+                        self.new_timeline.emit(timeline_text)
+                        
                         # Log every 100 tokens to avoid spam
                         if timeline_token_count % 100 == 0:
                             self.log_update.emit(f"[Timeline Generation] {timeline_token_count} tokens received...")
@@ -1423,7 +1447,7 @@ class BackgroundThread(QtCore.QThread):
                     self.log_update.emit(f"Warning: Error processing timeline chunk: {str(e)}")
                     continue
             
-            # Save timeline to file
+            # Final processing with completed timeline
             if timeline_text:
                 timeline_path = os.path.join(project_path, 'timeline.txt')
                 with open(timeline_path, 'w', encoding='utf-8') as f:
@@ -1434,7 +1458,7 @@ class BackgroundThread(QtCore.QThread):
                 timeline_word_count = len(timeline_text.split())
                 self.log_update.emit(f"Timeline generation complete: {timeline_word_count} words ({timeline_token_count} tokens)")
                 
-                # Emit new_timeline signal to update UI
+                # Final emit for consistency
                 self.new_timeline.emit(timeline_text)
             else:
                 self.log_update.emit("Warning: No timeline data generated")
@@ -4378,14 +4402,19 @@ SectionsPerChapter: {self.sections_spinbox.value()}
             if self.current_project:
                 self.current_project['synopsis'] = refined_content
         
-        self.approve_signal.emit('synopsis')
-        if self.current_project:
-            self.log_update.emit("Refined synopsis approved. Ready to proceed with planning.")
-        # Disable initial synopsis buttons
+        # Disable all synopsis buttons immediately
+        if hasattr(self, 'approve_button'):
+            self.approve_button.setEnabled(False)
+        if hasattr(self, 'adjust_button'):
+            self.adjust_button.setEnabled(False)
         if hasattr(self, 'initial_approve_button'):
             self.initial_approve_button.setEnabled(False)
         if hasattr(self, 'initial_adjust_button'):
             self.initial_adjust_button.setEnabled(False)
+        
+        self.approve_signal.emit('synopsis')
+        if self.current_project:
+            self.log_update.emit("Refined synopsis approved. Generating outline...")
     
     def _on_adjust_synopsis(self):
         """Handle Adjust button click - get feedback and emit adjust_signal."""
