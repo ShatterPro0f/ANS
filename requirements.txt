@@ -1,0 +1,12 @@
+# Core dependencies for ANS (Automated Novel System)
+PyQt5>=5.15.0
+ollama>=0.1.0
+
+# Optional dependencies for enhanced features
+qframelesswindow>=0.1.0  # For professional frameless window with Aero snap
+python-docx>=0.8.11      # For DOCX export functionality  
+reportlab>=3.6.0         # For PDF export functionality
+
+# Development dependencies
+pytest>=7.0.0           # For testing
+pytest-qt>=4.0.0        # For PyQt testing
