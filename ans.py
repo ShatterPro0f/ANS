@@ -4218,11 +4218,14 @@ SectionsPerChapter: {self.sections_spinbox.value()}
                 self.adjust_timeline_button.setEnabled(True)
     
     def _on_log_update(self, log_message):
-        """Handle log update signal. Display in Logs tab QTextEdit."""
+        """Handle log update signal. Display in Logs tab QTextEdit and write to rotating log file."""
         # Create log entry with timestamp
         log_entry = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {log_message}\n"
         
-        # Append to logs QTextEdit if it exists (all logging now goes to Config/log1-5.txt)
+        # Write to rotating app log file
+        self._write_app_log(log_message)
+        
+        # Append to logs QTextEdit for UI display
         if hasattr(self, 'logs_text_edit'):
             self.logs_text_edit.append(log_entry.rstrip())
     
