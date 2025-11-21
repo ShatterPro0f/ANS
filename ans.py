@@ -183,6 +183,37 @@ class BackgroundThread(QtCore.QThread):
                     self.refine_section_with_feedback(content_type, feedback)
                 return
             
+            # Check if this is a generation operation (not a novel generation config string)
+            if isinstance(self.inputs, dict) and self.inputs.get('operation'):
+                # Handle approval-triggered operations
+                parent = self.parent()
+                if parent is None or parent.__class__.__name__ != 'ANSWindow':
+                    self.processing_error.emit("No active project context")
+                    return
+                
+                parent_window = parent  # type: ignore
+                operation = self.inputs.get('operation')
+                content_type = self.inputs.get('type')
+                
+                # Load synopsis for context in all operations
+                if parent_window.current_project:  # type: ignore
+                    self.load_synopsis_from_project(parent_window.current_project['path'])  # type: ignore
+                
+                # Execute the appropriate operation
+                if operation == 'generate_outline':
+                    self.generate_outline(content_type)
+                elif operation == 'generate_characters':
+                    self.generate_characters(content_type)
+                elif operation == 'generate_world':
+                    self.generate_world(content_type)
+                elif operation == 'generate_timeline':
+                    self.generate_timeline(content_type)
+                elif operation == 'start_chapter_research_loop':
+                    self.start_chapter_research_loop()
+                elif operation == 'approve_section':
+                    self.approve_section(content_type)
+                return
+            
             # Validate inputs exist
             if not self.inputs:
                 self.processing_error.emit("No configuration provided")
@@ -4438,22 +4469,22 @@ SectionsPerChapter: {self.sections_spinbox.value()}
         if content_type == 'synopsis':
             # Save progress: synopsis approved
             self._save_progress('synopsis', 'approved')
-            # Synopsis approval triggers outline generation
-            self.thread.generate_outline(content_type)
+            # Queue outline generation in background thread via start_processing
+            self.thread.start_processing({'operation': 'generate_outline', 'type': 'synopsis'})
             if self.current_project:
                 self.log_update.emit("Synopsis approved. Generating outline...")
         elif content_type == 'outline':
             # Save progress: outline approved
             self._save_progress('outline', 'approved')
-            # Outline approval triggers character generation
-            self.thread.generate_characters(content_type)
+            # Queue character generation in background thread via start_processing
+            self.thread.start_processing({'operation': 'generate_characters', 'type': 'outline'})
             if self.current_project:
                 self.log_update.emit("Outline approved. Generating characters...")
         elif content_type == 'characters':
             # Save progress: characters approved
             self._save_progress('characters', 'approved')
-            # Characters approval triggers world generation
-            self.thread.generate_world(content_type)
+            # Queue world generation in background thread via start_processing
+            self.thread.start_processing({'operation': 'generate_world', 'type': 'characters'})
             if self.current_project:
                 self.log_update.emit("Characters approved. Generating world...")
         elif content_type == 'world':
@@ -4463,19 +4494,20 @@ SectionsPerChapter: {self.sections_spinbox.value()}
                 self.log_update.emit("World approved. All core planning stages complete!")
                 # Initialize chapter tracking after world approval
                 self._initialize_chapter_tracking()
-                # Generate timeline after planning complete
-                self.thread.generate_timeline(content_type)
+                # Queue timeline generation in background thread via start_processing
+                self.thread.start_processing({'operation': 'generate_timeline', 'type': 'world'})
                 self.log_update.emit("Generating timeline from planning...")
         elif content_type == 'timeline':
             # Save progress: timeline approved
             self._save_progress('timeline', 'approved')
             if self.current_project:
                 self.log_update.emit("Timeline approved. Beginning chapter-by-chapter research generation...")
-                # Start chapter research loop in background thread
-                self.thread.start_chapter_research_loop()
+                # Queue chapter research loop in background thread via start_processing
+                self.thread.start_processing({'operation': 'start_chapter_research_loop'})
         elif content_type == 'section':
             # Section approval: append to story, generate summary, update context
-            self.thread.approve_section(content_type)
+            # Queue section approval in background thread via start_processing
+            self.thread.start_processing({'operation': 'approve_section', 'type': 'section'})
             if self.current_project:
                 self.log_update.emit("Section approved. Processing and storing...")
     
