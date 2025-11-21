@@ -24,11 +24,37 @@ This workspace contains a PyQt5-based desktop application for automated novel ge
 #### ANSWindow Class
 The main application window inheriting from QMainWindow with:
 - Window title: "Automated Novel System"
-- Default geometry: 800x600 pixels
-- Tab widget with 6 tabs: Initialization, Novel Idea, Planning, Writing, Logs, Dashboard
+- Default geometry: 1200x800 pixels
+- Tab widget with 7 tabs: Initialization, Novel Idea, Planning, Writing, Logs, Dashboard, Settings
 - Custom signals for inter-component communication
 
-#### Project Creation System
+#### Synopsis System
+The application uses a two-file system for synopsis management to maintain clear separation between initial and refined versions:
+
+**Files:**
+- `synopsis.txt` - Initial synopsis (written once during generation, never modified after initial writing)
+- `refined_synopsis.txt` - Refined synopsis (overwritten with each refinement iteration until approved)
+- `summaries.txt` - Section summaries (separate from synopsis, used for chapter/section summaries after approval)
+
+**In-Memory State:**
+- `BackgroundThread.synopsis` - Stores current synopsis in memory during processing
+- Persists for entire session duration
+- Automatically synced between files and memory
+
+**Loading Behavior:**
+- `BackgroundThread.load_synopsis_from_project(project_path)` - Loads synopsis when needed
+  - Prioritizes `refined_synopsis.txt` (latest refined version)
+  - Falls back to `synopsis.txt` (initial version)
+  - Automatically called by: generate_outline, generate_characters when synopsis not in memory
+  - Allows seamless continuation of work on saved projects
+
+**Used By:**
+- `run()` - Initial generation writes to synopsis.txt
+- `run()` refinement phase - Writes refined version to refined_synopsis.txt
+- `refine_synopsis_with_feedback()` - Updates refined_synopsis.txt on each feedback iteration
+- `generate_outline()` - Uses synopsis for outline context
+- `generate_characters()` - Uses synopsis for character consistency
+- `_populate_planning_displays()` - Loads both files for display on project load
 The application supports multiple independent novel projects organized in a `projects/` folder:
 
 **App-Level Configuration (`Config/` folder, created on startup):**
@@ -41,8 +67,11 @@ The application supports multiple independent novel projects organized in a `pro
 - `projects/<project_name>/context.txt` - Story context and background
 - `projects/<project_name>/characters.txt` - Character data (JSON format)
 - `projects/<project_name>/world.txt` - World-building data (JSON format)
-- `projects/<project_name>/summaries.txt` - Story summaries and outlines
+- `projects/<project_name>/synopsis.txt` - Initial synopsis (written once, never modified)
+- `projects/<project_name>/refined_synopsis.txt` - Refined synopsis (overwritten with each refinement iteration)
+- `projects/<project_name>/summaries.txt` - Story summaries and section outlines (generated after sections are approved)
 - `projects/<project_name>/outline.txt` - Generated 25-chapter novel outline with chapter summaries
+- `projects/<project_name>/timeline.txt` - Timeline with dates, locations, and events
 - `projects/<project_name>/buffer_backup.txt` - Temporary buffer backup
 - `projects/<project_name>/drafts/` - Folder for draft versions
 - Placeholders: `story_backup.txt`, `log_backup.txt` (not auto-created)
@@ -60,14 +89,22 @@ The application supports loading and managing existing projects with session per
   - Validates all required project files exist
   - Loads all project data into memory as a dictionary
   - Logs the load action to `Config/app_settings.txt`
+  - **NEW**: Automatically populates Planning tab displays with existing project data via `_populate_planning_displays()`
 - `get_project_list()` - Returns sorted list of all existing projects in `projects/` folder
 - `get_current_project()` - Returns the currently loaded project data (None if no project loaded)
 - `_read_file(filepath)` - Utility to safely read file content
+- `_populate_planning_displays()` - **NEW** - Populates Planning tab text displays with existing project data on project load
+  - Loads outline from `outline.txt` if it exists
+  - Loads characters, world, and timeline from project data
+  - Displays data immediately so user sees where they left off
+  - Handles JSON parsing and formatting for characters/world data
+  - Logs completion to project log
 
 **Session Persistence:**
 - `self.current_project` stores loaded project data in memory for the duration of the app session
 - Remains accessible across tabs and components while app is running
 - Contains: name, path, story, log, config, context, characters, world, summaries, buffer_backup
+- **NEW**: Planning displays automatically refreshed with existing data when project is loaded
 
 #### Signals
 Used for event communication between components:
@@ -89,6 +126,21 @@ Used for event communication between components:
 Thread for long-running operations (novel generation, processing):
 - Inherits from `QtCore.QThread`
 - Stores input configuration in `self.inputs`
+- **Stores generated/refined synopsis in memory**: `self.synopsis` attribute persists throughout session
+- **Method to load synopsis from project**: `load_synopsis_from_project(project_path)` 
+  - Attempts to load refined_synopsis.txt first (latest version)
+  - Falls back to synopsis.txt if refined version doesn't exist
+  - Handles both file loading scenarios for saved projects
+- **Configurable Settings** (with defaults, synced from ANSWindow settings via `_sync_settings_to_thread()`):
+  - `llm_model` - LLM model name (default: 'gemma3:12b', synced from Settings tab model selection) ✓ ALL 20+ LLM CALLS UPDATED
+  - `temperature` - LLM temperature/creativity (default: 0.7, range 0.0-1.0, synced from Settings tab slider) ✓ APPLIED TO ALL CALLS
+  - `max_retries` - Maximum retry attempts for LLM calls (default: 3, range 1-10)
+  - `detail_level` - Generation detail level (default: 'balanced', options: 'concise', 'balanced', 'detailed')
+  - `character_depth` - Character profile depth (default: 'standard', options: 'shallow', 'standard', 'deep')
+  - `world_depth` - World-building depth (default: 'standard', options: 'minimal', 'standard', 'comprehensive')
+  - `quality_check` - Quality check strictness (default: 'moderate', options: 'strict', 'moderate', 'lenient')
+  - `sections_per_chapter` - Sections generated per chapter (default: 3, range 1-10)
+  - **CRITICAL FIX**: All LLM calls now use `model=self.llm_model` instead of hardcoded `model='gemma3:12b'`
 - **Signals emitted**: 
   - `processing_finished(str)` - Processing complete with result
   - `processing_error(str)` - Error during processing
@@ -99,8 +151,30 @@ Thread for long-running operations (novel generation, processing):
   - `new_synopsis(str)` - Refined synopsis ready (streamed tokens)
   - `new_outline(str)` - Generated or refined 25-chapter outline (streamed tokens)
   - `new_characters(str)` - Generated character JSON array (streamed tokens)
+- **CRITICAL: Per-Token Streaming in Refinement Methods** (November 20, 2025 FIX):
+  - **Issue**: All 5 refinement methods were collecting all tokens internally, then emitting ONE signal at the end with complete content
+  - **Root Cause**: Handler `_on_new_synopsis()` relies on length comparison (`new_length > current_length`) to detect incremental updates. Single end-of-process emit only satisfied this once.
+  - **Fix**: All refinement methods now emit signal for EVERY TOKEN collected:
+    ```python
+    for chunk in refinement_stream:
+        if token:
+            refined_content += token
+            self.new_signal.emit(refined_content)  # Emit every token (was missing)
+            
+            if token_count % 100 == 0:
+                self.log_update.emit(...)  # Log for tracking
+    ```
+  - **Methods Fixed** (all now stream per-token):
+    1. `refine_synopsis_with_feedback()` - emits `new_synopsis` every token
+    2. `refine_outline_with_feedback()` - emits `new_outline` every token
+    3. `refine_characters_with_feedback()` - emits `new_characters` every token
+    4. `refine_world_with_feedback()` - emits `new_world` every token
+    5. `refine_timeline_with_feedback()` - emits `new_timeline` every token
+    6. `refine_section_with_feedback()` - emits `new_draft` for all 3 streams (main refinement + 2 polish passes)
+  - **Result**: Handler now sees incremental length growth and appends text live to display
+  - **Pause Support**: All token loops now check `self.wait_while_paused()` for pause/resume control
 - **Key Methods**:
-  - `_generate_with_retry(parent_window, model, prompt, max_retries=3)` - Wrapper for all LLM calls with automatic retry logic on connection failures (returns stream iterator or None on failure after all retries, exponential backoff: 1s, 2s, 4s)
+  - `_generate_with_retry(parent_window, model, prompt, max_retries=None)` - Wrapper for all LLM calls with automatic retry logic using thread settings (returns stream iterator or None on failure after all retries, exponential backoff: 1s, 2s, 4s)
   - `start_processing(data)` - Sets inputs and starts thread execution with proper cleanup
   - `set_paused(paused)` - Sets pause flag for pause/resume control
   - `is_paused()` - Checks if thread is currently paused
@@ -124,13 +198,15 @@ Thread for long-running operations (novel generation, processing):
 
 **Retry Logic Implementation (_generate_with_retry)**:
 - All streaming LLM calls in BackgroundThread now use the `_generate_with_retry()` wrapper
-- Signature: `stream = self._generate_with_retry(parent_window, model='gemma3:12b', prompt=prompt, max_retries=3)`
+- Signature: `stream = self._generate_with_retry(parent_window, model=self.llm_model, prompt=prompt)`
+- Uses `max_retries` from thread settings (default 3, configurable 1-10)
 - Returns the stream iterator on success, or None if all retries fail
 - Automatically logs retry attempts and failures with exponential backoff (1s, 2s, 4s delays)
 - Emits error_signal to parent window on final failure after all retries
+- Applies temperature setting from `self.temperature` to all LLM calls
 - Usage pattern for all LLM generate calls:
   ```python
-  stream = self._generate_with_retry(parent_window, model='gemma3:12b', prompt=prompt, max_retries=3)
+  stream = self._generate_with_retry(parent_window, model=self.llm_model, prompt=prompt)
   if stream is None:
       self.log_update.emit("Failed to generate content after retries")
       return
@@ -156,7 +232,49 @@ Thread for long-running operations (novel generation, processing):
   14. start_chapter_research_loop() (1 call)
   15. generate_novel_section() (3 calls: draft_stream, polish_stream, enhance_stream)
 
-**Synopsis/Outline/Character Generation Workflow**:
+**BackgroundThread.run() Method (line 124-172):**
+- **Purpose**: Main execution entry point for novel generation pipeline
+- **Key Fix (November 2025)**: Config string parsing rewritten to handle multi-line idea/tone text
+  - **OLD Method**: Used regex pattern `r'Idea: (.+?), Tone: (.+?)(?:, Soft Target: (\d+))?$'` with `re.search(pattern, str(self.inputs), re.DOTALL)`
+  - **Issue**: Failed when idea or tone contained newlines - regex `.+?` and `$` anchor incompatible with multiline text, caused silent return with no error logs
+  - **NEW Method**: String position-based parsing (more robust):
+    ```python
+    soft_target = 250000
+    inputs_str = str(self.inputs)
+    
+    # Extract soft target from end using regex on last line only
+    soft_target_match = re.search(r', Soft Target: (\d+)$', inputs_str)
+    if soft_target_match:
+        soft_target = int(soft_target_match.group(1))
+        inputs_str = inputs_str[:soft_target_match.start()]
+    
+    # Find separators using string methods
+    idea_start = inputs_str.find('Idea: ')
+    tone_start = inputs_str.rfind(', Tone: ')  # rfind finds LAST occurrence
+    
+    # Validate separators found
+    if idea_start == -1 or tone_start == -1:
+        self.processing_error.emit(f"Invalid config format: {self.inputs}")
+        return
+    
+    # Extract substrings between separators
+    idea = inputs_str[idea_start + 6:tone_start].strip()
+    tone = inputs_str[tone_start + 8:].strip()
+    ```
+  - **Why This Works**: Handles arbitrary text in idea/tone (including newlines, commas) because we:
+    1. Find soft target from the END (not corrupted by multiline separators)
+    2. Use `rfind()` for tone separator to find the LAST `, Tone:` in case idea contains `, Tone:`
+    3. No regex anchors or greedy/non-greedy quantifiers that fail on newlines
+- **Logging**: Emits comprehensive logs at each step for debugging:
+  - `"Parsed config - Idea: {idea[:50]}... | Tone: {tone[:30]}... | Target: {soft_target}"`
+  - `"Generating initial synopsis (streaming tokens)..."`
+  - And subsequent progress logs from refinement and outline generation
+
+**Config String Format** (from ANSWindow._on_start_signal):
+- Format: `f"Idea: {idea_text}, Tone: {tone_text}, Soft Target: {word_count}"`
+- Example with multiline: `"Idea: A dragon awakens in the valley,\nfilled with ancient magic.\nTone: Dark fantasy with\ntones of mystery, Soft Target: 5000"`
+- Note: Idea and tone can contain newlines from QTextEdit widgets, commas, and other characters
+- All three components used to configure initial synopsis generation
 1. Synopsis Phase:
    - Parse config string (Idea, Tone, Soft Target)
    - Generate initial synopsis with streaming (emits `synopsis_ready` every token)
@@ -235,27 +353,41 @@ The Planning tab manages the synopsis generation, refinement, outline generation
   - `characters_display` - Shows character profiles in JSON format (with Expand button)
   - `world_display` - Shows world-building details (with Expand button)
   - `timeline_display` - Shows timeline with dates, locations, and events (with Expand button)
-- **Expand Functionality**:
+- **Expand Functionality** (UPDATED):
   - Each text display has an "Expand" button that opens a fullscreen dialog (1000x800px)
   - Dialog shows the complete text with dedicated close button
+  - **NEW**: Expanded window continues to receive streaming updates in real-time
+  - **Implementation**: `expanded_text_widgets` dictionary stores references to all open expanded windows
+  - **Streaming Updates**: All signal handlers (`_on_synopsis_ready`, `_on_new_synopsis`, `_on_new_outline`) check for open expanded windows and append new tokens
   - Preserves original text and scroll positions
   - Method: `_expand_text_window(window_name)` - Opens expanded dialog for any text widget
-- **Planning Tab Buttons** (emit `approve_signal(section)` or `adjust_signal(section, feedback)`):
+  - Method: `_on_expanded_window_close(window_name, dialog)` - Removes reference when dialog closes
+- **Planning Tab Buttons** (context-aware - emit signals during generation, log guidance for loaded content):
+  - **Context Detection Pattern** (UPDATED):
+    - All approve/adjust buttons now check `if self.thread.isRunning()` to determine context:
+      - **IF TRUE** (active generation): Emit `approve_signal(section)` or `adjust_signal(section, feedback)` to trigger refinement loops
+      - **IF FALSE** (loaded project content): Log helpful message guiding user to manual edit or start new generation
+    - Loaded content identified by: existing project data displayed in text widgets when project loads
   - Synopsis Section:
-    - `approve_button` - `_on_approve_synopsis()` → Emits `approve_signal('synopsis')` to accept refined synopsis; disabled during refinement; triggers outline generation
-    - `adjust_button` - `_on_adjust_synopsis()` → Opens QInputDialog for feedback, emits `adjust_signal('synopsis', feedback)`; disabled during refinement
+    - `approve_button` - `_on_approve_synopsis()` → Checks for content, updates current_project['synopsis'], then emits `approve_signal('synopsis')` only if thread running
+    - `adjust_button` - `_on_adjust_synopsis()` → Gets feedback, conditionally emits `adjust_signal('synopsis', feedback)` if thread running; logs guidance for loaded content
+    - **NEW - Initial Synopsis Buttons**:
+      - `initial_approve_button` - `_on_approve_initial_synopsis()` → Checks for content, routes to normal approve flow
+      - `initial_adjust_button` - `_on_adjust_initial_synopsis()` → Gets feedback, conditionally emits based on thread state
+      - Both enabled when initial synopsis finishes streaming (in `_on_synopsis_ready()`)
+      - Both disabled when user clicks approve/adjust (streams initial refinement)
   - Outline Section:
-    - `approve_outline_button` - `_on_approve_outline()` → Emits `approve_signal('outline')` to accept outline; disabled during refinement; marks outline as complete
-    - `adjust_outline_button` - `_on_adjust_outline()` → Opens QInputDialog for feedback, emits `adjust_signal('outline', feedback)`; disabled during refinement
+    - `approve_outline_button` - `_on_approve_outline()` → Checks outline_display for content, updates current_project['outline'], emits signal
+    - `adjust_outline_button` - `_on_adjust_outline()` → Gets feedback, conditionally emits `adjust_signal('outline', feedback)` if thread running; logs guidance for loaded content
   - Characters Section:
-    - `approve_characters_button` - `_on_approve_characters()` → Emits `approve_signal('characters')`; disabled during refinement
-    - `adjust_characters_button` - `_on_adjust_characters()` → Opens QInputDialog for feedback, emits `adjust_signal('characters', feedback)`
+    - `approve_characters_button` - `_on_approve_characters()` → Checks characters_display for content, updates current_project['characters'], emits signal
+    - `adjust_characters_button` - `_on_adjust_characters()` → Gets feedback, conditionally emits `adjust_signal('characters', feedback)` if thread running; logs guidance for loaded content
   - World Section:
-    - `approve_world_button` - `_on_approve_world()` → Emits `approve_signal('world')`; disabled during refinement
-    - `adjust_world_button` - `_on_adjust_world()` → Opens QInputDialog for feedback, emits `adjust_signal('world', feedback)`
+    - `approve_world_button` - `_on_approve_world()` → Checks world_display for content, updates current_project['world'], emits signal
+    - `adjust_world_button` - `_on_adjust_world()` → Gets feedback, conditionally emits `adjust_signal('world', feedback)` if thread running; logs guidance for loaded content
   - Timeline Section:
-    - `approve_timeline_button` - `_on_approve_timeline()` → Emits `approve_signal('timeline')`; disables both buttons after approval
-    - `adjust_timeline_button` - `_on_adjust_timeline()` → Opens QInputDialog for feedback, emits `adjust_signal('timeline', feedback)`; disables buttons during refinement
+    - `approve_timeline_button` - `_on_approve_timeline()` → Checks timeline_display for content, updates current_project['timeline'], emits signal, disables buttons
+    - `adjust_timeline_button` - `_on_adjust_timeline()` → Gets feedback, conditionally emits `adjust_signal('timeline', feedback)` if thread running; disables buttons during refinement; logs guidance for loaded content
 - **Multi-Phase Workflow**:
   1. **Synopsis Generation Phase**: User enters idea/tone in Novel Idea tab and clicks "Start"
      - BackgroundThread generates initial synopsis (streams to `synopsis_display`)
@@ -301,9 +433,9 @@ The Planning tab manages the synopsis generation, refinement, outline generation
 The Writing tab manages chapter-by-chapter draft generation and refinement:
 - **Displays**:
   - `draft_display` - Shows current section draft as it streams from Ollama (with Expand button)
-- **Writing Tab Buttons**:
-  - `approve_section_button` - `_on_approve_section()` → Emits `approve_signal('section')` to accept section and move to next
-  - `adjust_section_button` - `_on_adjust_section()` → Opens QInputDialog for feedback, emits `adjust_signal('section', feedback)`
+- **Writing Tab Buttons** (context-aware - emit signals during generation, log guidance for inactive):
+  - `approve_section_button` - `_on_approve_section()` → Checks draft_display for content, updates buffer and current_project, emits `approve_signal('section')`; validates thread context
+  - `adjust_section_button` - `_on_adjust_section()` → Validates draft exists, gets feedback, conditionally emits `adjust_signal('section', feedback)` if thread running; logs guidance for inactive context
   - `pause_button` - `_on_pause_generation()` → Sets `thread.paused = True`, calls `wait_while_paused()` in streaming loops, hides Pause button, shows Resume button
   - `resume_button` - `_on_resume_generation()` → Sets `thread.paused = False`, resumes execution in streaming loops, hides Resume button, shows Pause button
 - **Pause/Resume Workflow**:
@@ -488,6 +620,57 @@ The Dashboard tab provides project overview and novel export options:
 - **Logging**: All exports logged with format `"Novel exported to {FORMAT}: {filepath}"`
 - **Status Updates**: Export status displayed in `export_status_label` with checkmark (✓) for success or X (✗) for failure
 
+#### Settings Tab & Configuration Management
+The Settings tab provides comprehensive application configuration options:
+- **Theme Settings Group**:
+  - `dark_mode_checkbox` - Toggle dark/light mode UI theme
+  - `_apply_dark_mode()` - Apply dark theme stylesheet
+  - `_apply_light_mode()` - Apply light theme stylesheet (default)
+- **LLM Configuration Group**:
+  - `model_combo` - Select LLM model from installed Ollama models (default: 'gemma3:12b')
+  - `temperature_slider` - Adjust LLM temperature (0-100, maps to 0.0-1.0, default: 0.70)
+  - `temperature_value_label` - Display current temperature value
+  - `refresh_models_btn` - Re-scan Ollama for installed models
+  - `_populate_ollama_models()` - Auto-detect models from Ollama
+  - `_refresh_ollama_models()` - User-triggered model refresh
+  - `_get_available_models()` - Retrieve available models from Ollama client
+- **Application Settings Group**:
+  - `autosave_spinbox` - Auto-save interval in minutes (1-60, default: 15)
+  - `notifications_checkbox` - Enable/disable notifications (default: True)
+  - `autoapproval_checkbox` - Auto-approve content without user review (default: False)
+- **Generation Parameters Group**:
+  - `max_retries_spinbox` - Maximum LLM retry attempts (1-10, default: 3)
+  - `detail_combo` - Generation detail level (options: Concise, Balanced, Detailed; default: Balanced)
+  - `char_depth_combo` - Character profile depth (options: Shallow, Standard, Deep; default: Standard)
+  - `world_depth_combo` - World-building depth (options: Minimal, Standard, Comprehensive; default: Standard)
+  - `quality_combo` - Quality check strictness (options: Strict, Moderate, Lenient; default: Moderate)
+  - `sections_spinbox` - Sections per chapter (1-10, default: 3)
+- **Application Info Group**:
+  - `version_label` - Display application version (1.0.0)
+  - `about_button` - Show detailed about dialog with features
+  - `_on_about_clicked()` - Display application information dialog
+- **Settings Persistence**:
+  - `_load_settings()` - Load app settings from `Config/app_settings.txt` on startup
+  - `_save_settings()` - Save all settings to `Config/app_settings.txt` when changed
+  - Settings automatically saved on every control change (connected to valueChanged/stateChanged/currentTextChanged signals)
+  - `_sync_settings_to_thread()` - Sync UI settings to BackgroundThread before generation starts
+  - All settings synced to thread in `_on_start_signal()` before novel generation begins
+- **Settings File Format** (`Config/app_settings.txt`):
+  ```
+  DarkMode: True/False
+  Model: gemma3:12b
+  Temperature: 0.7
+  AutoSave: 15
+  Notifications: True
+  AutoApproval: False
+  MaxRetries: 3
+  DetailLevel: balanced
+  CharacterDepth: standard
+  WorldDepth: standard
+  QualityCheck: moderate
+  SectionsPerChapter: 3
+  ```
+
 ### Running the Application
 ```bash
 python ans.py
@@ -500,10 +683,12 @@ python ans.py
 - reportlab: `pip install reportlab` (optional, for PDF export)
 
 ### Project Statistics
-- **Tabs**: 6 (Initialization, Novel Idea, Planning, Writing, Logs, Dashboard)
+- **Tabs**: 7 (Initialization, Novel Idea, Planning, Writing, Logs, Dashboard, Settings)
 - **Signals**: 14 total (inter-component communication, includes new_outline, outline_refinement_start, new_characters)
 - **Project Files**: 9 per project (story, log, config, context, characters, world, summaries, outline, buffer_backup)
-- **LLM Model**: gemma3:12b (local via Ollama)
+- **LLM Model**: Configurable (default: gemma3:12b, local via Ollama)
+- **Configurable Parameters**: 8 total (model, temperature, max_retries, detail_level, character_depth, world_depth, quality_check, sections_per_chapter)
+- **App-Level Settings**: Dark mode, model selection, temperature, auto-save, notifications, auto-approval
 - **Streaming**: Real-time token streaming for synopsis generation, refinement, outline generation, outline refinement, character generation, section refinement, and consistency checking
 - **Outline Refinement**: Unlimited iterations with user feedback, keeps tone and structure
 - **Outline Generation**: 25 chapters with 100-200 word summaries per chapter, dynamic chapter lengths (5000-15000 words)
@@ -513,6 +698,11 @@ python ans.py
 - **Progress Milestones**: 80% threshold triggers user dialog for novel extension (+5 chapters) or wrap-up (+2 chapters)
 - **Pause/Resume**: Non-blocking pause control with 100ms sleep intervals, button toggling, thread-safe flag system
 - **Final Validation**: Consistency checking against characters/world/timeline with plot hole and vocabulary issue detection, QMessageBox auto-fix prompt
+- **Settings Persistence**: All settings persisted to `Config/app_settings.txt`, synced to BackgroundThread before each generation
+- **Context-Aware Buttons** (NEW): All approve/adjust buttons now distinguish between active generation and loaded content:
+  - **Active Generation** (thread.isRunning()): Emit signals to trigger refinement loops
+  - **Loaded Content** (!thread.isRunning()): Log helpful guidance directing user to manual edit or start new generation
+  - Enables editing both newly generated and previously saved project content
 
 ### Common Tasks Reference
 

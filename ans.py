@@ -61,19 +61,60 @@ class BackgroundThread(QtCore.QThread):
         self.project_path = None  # Store project path for backup access
         self.synopsis = ''  # Store generated synopsis
         self.paused = False  # Flag for pause/resume control
+        
+        # Refinement tracking for loaded content adjustments
+        self.refinement_type = None  # Content type being refined ('synopsis', 'outline', etc.)
+        self.refinement_feedback = None  # Feedback for refinement
+        
+        # Settings with defaults
+        self.llm_model = 'gemma3:12b'
+        self.temperature = 0.7
+        self.max_retries = 3
+        self.detail_level = 'balanced'
+        self.character_depth = 'standard'
+        self.world_depth = 'standard'
+        self.quality_check = 'moderate'
+        self.sections_per_chapter = 3
     
-    def _generate_with_retry(self, parent_window, model: str, prompt: str, max_retries: int = 3):
+    def load_synopsis_from_project(self, project_path):
+        """Load synopsis from project files. Tries refined_synopsis.txt first, then synopsis.txt."""
+        self.synopsis = ''
+        
+        # Try to load refined synopsis first (latest version)
+        refined_synopsis_path = os.path.join(project_path, 'refined_synopsis.txt')
+        if os.path.exists(refined_synopsis_path):
+            try:
+                with open(refined_synopsis_path, 'r', encoding='utf-8') as f:
+                    self.synopsis = f.read().strip()
+                if self.synopsis:
+                    return
+            except Exception as e:
+                self.log_update.emit(f"Failed to load refined synopsis: {str(e)}")
+        
+        # Fall back to initial synopsis if refined not found
+        synopsis_path = os.path.join(project_path, 'synopsis.txt')
+        if os.path.exists(synopsis_path):
+            try:
+                with open(synopsis_path, 'r', encoding='utf-8') as f:
+                    self.synopsis = f.read().strip()
+            except Exception as e:
+                self.log_update.emit(f"Failed to load initial synopsis: {str(e)}")
+    
+    def _generate_with_retry(self, parent_window, model: str, prompt: str, max_retries: Optional[int] = None):
         """Generate LLM response with automatic retry logic.
         
         Args:
             parent_window: ANSWindow instance with client
             model: Model name (e.g., 'gemma3:12b')
             prompt: Prompt text to send to LLM
-            max_retries: Maximum number of retry attempts (default 3)
+            max_retries: Maximum number of retry attempts (default from settings)
         
         Returns:
             Generator/Iterator with streamed response, or None if all retries failed
         """
+        if max_retries is None:
+            max_retries = self.max_retries
+        
         for attempt in range(max_retries):
             try:
                 if not hasattr(parent_window, 'client'):
@@ -83,7 +124,8 @@ class BackgroundThread(QtCore.QThread):
                 stream = parent_window.client.generate(
                     model=model,
                     prompt=prompt,
-                    stream=True
+                    stream=True,
+                    options={'temperature': self.temperature}
                 )
                 
                 if not hasattr(stream, '__iter__'):
@@ -110,40 +152,82 @@ class BackgroundThread(QtCore.QThread):
     def run(self):
         """Main thread execution. Parse inputs and emit status."""
         try:
+            # Check if this is a refinement operation on loaded content
+            if isinstance(self.inputs, dict) and self.inputs.get('refinement'):
+                # Handle refinement of loaded content
+                parent = self.parent()
+                if parent is None or parent.__class__.__name__ != 'ANSWindow':
+                    self.processing_error.emit("No active project context")
+                    return
+                
+                parent_window = parent  # type: ignore
+                content_type = self.inputs.get('type')
+                feedback = self.inputs.get('feedback', '')
+                
+                # Load synopsis from project for refinement context
+                if parent_window.current_project:  # type: ignore
+                    self.load_synopsis_from_project(parent_window.current_project['path'])  # type: ignore
+                
+                # Call the appropriate refinement method
+                if content_type == 'synopsis':
+                    self.refine_synopsis_with_feedback(content_type, feedback)
+                elif content_type == 'outline':
+                    self.refine_outline_with_feedback(content_type, feedback)
+                elif content_type == 'characters':
+                    self.refine_characters_with_feedback(content_type, feedback)
+                elif content_type == 'world':
+                    self.refine_world_with_feedback(content_type, feedback)
+                elif content_type == 'timeline':
+                    self.refine_timeline_with_feedback(content_type, feedback)
+                elif content_type == 'section':
+                    self.refine_section_with_feedback(content_type, feedback)
+                return
+            
             # Validate inputs exist
             if not self.inputs:
                 self.processing_error.emit("No configuration provided")
                 return
             
             # Parse configuration string: "Idea: {idea}, Tone: {tone}, Soft Target: {target}"
-            pattern = r'Idea: (.+?), Tone: (.+?)(?:, Soft Target: (\d+))?$'
-            match = re.match(pattern, str(self.inputs))
+            # Look for separators from the end to extract soft target first
+            soft_target = 250000
+            inputs_str = str(self.inputs)
             
-            if not match:
+            # Try to extract soft target from end
+            soft_target_match = re.search(r', Soft Target: (\d+)$', inputs_str)
+            if soft_target_match:
+                soft_target = int(soft_target_match.group(1))
+                # Remove the soft target from the string
+                inputs_str = inputs_str[:soft_target_match.start()]
+            
+            # Now find where "Idea:" and ", Tone:" are
+            idea_start = inputs_str.find('Idea: ')
+            tone_start = inputs_str.rfind(', Tone: ')  # Use rfind to get the last occurrence
+            
+            if idea_start == -1 or tone_start == -1:
                 self.processing_error.emit(f"Invalid config format: {self.inputs}")
                 return
             
-            # Extract parsed values
-            idea = match.group(1).strip()
-            tone = match.group(2).strip()
-            soft_target = int(match.group(3)) if match.group(3) else 250000
+            # Extract idea and tone
+            idea = inputs_str[idea_start + 6:tone_start].strip()  # Skip "Idea: "
+            tone = inputs_str[tone_start + 8:].strip()  # Skip ", Tone: "
             
             # Emit log update with parsing result
-            log_msg = f"Parsed config - Idea: {idea}, Tone: {tone}, Soft Target: {soft_target}"
-            self.processing_progress.emit(log_msg)
+            log_msg = f"Parsed config - Idea: {idea[:50]}..., Tone: {tone[:50]}..., Soft Target: {soft_target}"
+            self.log_update.emit(log_msg)
             # Get parent window (ANSWindow) to access current_project
             parent = self.parent()
-            # Validate parent is ANSWindow before proceeding
-            if parent is None or not isinstance(parent, ANSWindow):
+            # Validate parent is ANSWindow before proceeding (check by class name to avoid forward reference)
+            if parent is None or parent.__class__.__name__ != 'ANSWindow':
                 self.processing_error.emit("No active project context")
                 return
             
-            parent_window: ANSWindow = parent
-            if not hasattr(parent_window, 'current_project') or not parent_window.current_project:
+            parent_window = parent  # type: ignore  # parent is ANSWindow at runtime
+            if not hasattr(parent_window, 'current_project') or not parent_window.current_project:  # type: ignore
                 self.processing_error.emit("No active project")
                 return
             
-            project_path = parent_window.current_project['path']
+            project_path = parent_window.current_project['path']  # type: ignore
             
             # Write to config.txt with key-value pairs
             config_data = (
@@ -181,12 +265,12 @@ class BackgroundThread(QtCore.QThread):
             
             # Generate synopsis using LLM
             self.log_update.emit("Starting synopsis generation...")
-            parent = self.parent()
-            if parent is None or not isinstance(parent, ANSWindow):
+            parent_window_check = self.parent()
+            if parent_window_check is None or not isinstance(parent_window_check, QtWidgets.QMainWindow):
                 self.log_update.emit("Synopsis generation: Invalid parent window")
                 return
             
-            parent_window: ANSWindow = parent
+            parent_window = parent_window_check
             
             if not hasattr(parent_window, 'client'):
                 self.log_update.emit("Synopsis generation: Parent has no client attribute")
@@ -217,7 +301,7 @@ class BackgroundThread(QtCore.QThread):
                 # Use retry helper to get stream
                 stream = self._generate_with_retry(
                     parent_window,
-                    model='gemma3:12b',
+                    model=self.llm_model,
                     prompt=synopsis_prompt,
                     max_retries=3
                 )
@@ -262,12 +346,10 @@ class BackgroundThread(QtCore.QThread):
                 
                 word_count = len(self.synopsis.split())
                 
-                # Save synopsis to summaries.txt
-                summaries_path = os.path.join(project_path, 'summaries.txt')
-                with open(summaries_path, 'w', encoding='utf-8') as f:
-                    f.write("=== SYNOPSIS ===\n\n")
+                # Save initial synopsis to synopsis.txt
+                synopsis_path = os.path.join(project_path, 'synopsis.txt')
+                with open(synopsis_path, 'w', encoding='utf-8') as f:
                     f.write(self.synopsis)
-                    f.write("\n\n=== END SYNOPSIS ===\n")
                 
                 # Log only once at the end of generation
                 self.log_update.emit(f"Synopsis generation complete: {word_count} words ({token_count} tokens)")
@@ -293,7 +375,7 @@ class BackgroundThread(QtCore.QThread):
                 # Use retry helper for refinement
                 refinement_stream = self._generate_with_retry(
                     parent_window,
-                    model='gemma3:12b',
+                    model=self.llm_model,
                     prompt=refinement_prompt,
                     max_retries=3
                 )
@@ -330,20 +412,15 @@ class BackgroundThread(QtCore.QThread):
                         self.synopsis = refined_synopsis
                         refined_word_count = len(self.synopsis.split())
                         
-                        # Save refined synopsis
-                        with open(summaries_path, 'w', encoding='utf-8') as f:
-                            f.write("=== SYNOPSIS (REFINED) ===\n\n")
+                        # Save refined synopsis to refined_synopsis.txt
+                        refined_synopsis_path = os.path.join(project_path, 'refined_synopsis.txt')
+                        with open(refined_synopsis_path, 'w', encoding='utf-8') as f:
                             f.write(self.synopsis)
-                            f.write("\n\n=== END SYNOPSIS ===\n")
                         
                         self.log_update.emit(f"Synopsis refinement complete: {refined_word_count} words ({refinement_token_count} tokens)")
                         
                         # Emit new_synopsis signal with refined text
                         self.new_synopsis.emit(self.synopsis)
-                        
-                        # Save progress: synopsis ready for approval
-                        if isinstance(parent_window, ANSWindow):
-                            parent_window._save_progress('synopsis', 'ready_for_approval')
                 else:
                     self.log_update.emit("Synopsis refinement failed after retries")
             
@@ -434,6 +511,17 @@ class BackgroundThread(QtCore.QThread):
             self.log_update.emit("Error: No active project for refinement")
             return
         
+        # Ensure we have the synopsis to refine
+        if not self.synopsis:
+            self.log_update.emit("[DEBUG] Synopsis not in memory, loading from project...")
+            self.load_synopsis_from_project(parent_window.current_project['path'])
+        
+        if not self.synopsis:
+            self.log_update.emit("Error: No synopsis available for refinement")
+            return
+        
+        self.log_update.emit(f"[DEBUG] Synopsis loaded: {len(self.synopsis)} characters")
+        
         # Get tone from the novel idea inputs if available
         tone = ""
         if hasattr(parent_window, 'tone_input'):
@@ -442,14 +530,27 @@ class BackgroundThread(QtCore.QThread):
         if not tone:
             tone = "as originally specified"
         
-        # Generate refinement prompt with feedback
+        # Emit refinement_start signal to clear display and disable buttons
+        refinement_start_signal = parent_window.refinement_start if hasattr(parent_window, 'refinement_start') else None
+        if refinement_start_signal:
+            refinement_start_signal.emit()
+        
+        # Generate refinement prompt WITH FULL SYNOPSIS CONTEXT
         refinement_prompt = (
-            f"Incorporate this feedback into the synopsis: \"{feedback}\". "
-            f"Maintain tone: \"{tone}\" and coherence. "
-            f"Check for vocabulary overuse and plot consistency. "
-            f"Return ONLY the revised synopsis, no explanation or preamble."
+            f"Refine this synopsis based on the following feedback:\n\n"
+            f"ORIGINAL SYNOPSIS:\n{self.synopsis}\n\n"
+            f"USER FEEDBACK:\n{feedback}\n\n"
+            f"INSTRUCTIONS:\n"
+            f"- Incorporate the feedback while maintaining the core story\n"
+            f"- Keep tone: {tone}\n"
+            f"- Maintain coherence and plot consistency\n"
+            f"- Avoid vocabulary overuse\n"
+            f"- Return ONLY the revised synopsis, no explanation or preamble."
         )
         
+        # DEBUG: Log the prompt being sent
+        self.log_update.emit(f"[DEBUG] Refinement prompt length: {len(refinement_prompt)} characters")
+        self.log_update.emit(f"[DEBUG] Tone being used: {tone[:50]}..." if len(tone) > 50 else f"[DEBUG] Tone being used: {tone}")
         self.log_update.emit("Starting synopsis refinement with user feedback...")
         refined_synopsis = ''
         refinement_token_count = 0
@@ -457,7 +558,7 @@ class BackgroundThread(QtCore.QThread):
         # Use retry helper for refinement
         refinement_stream = self._generate_with_retry(
             parent_window,
-            model='gemma3:12b',
+            model=self.llm_model,
             prompt=refinement_prompt,
             max_retries=3
         )
@@ -466,9 +567,12 @@ class BackgroundThread(QtCore.QThread):
             self.log_update.emit("Failed to refine synopsis after retries")
             return
         
-        # Collect refined tokens
+        # Stream refined tokens in REAL-TIME for live display updates
         for chunk in refinement_stream:
             try:
+                # Check for pause
+                self.wait_while_paused()
+                
                 # Handle both dict and GenerateResponse object formats
                 token = None
                 
@@ -481,6 +585,10 @@ class BackgroundThread(QtCore.QThread):
                     refined_synopsis += token
                     refinement_token_count += 1
                     
+                    # EMIT EVERY TOKEN for live streaming (this is key!)
+                    # Handler checks if new_length > current_length to detect updates
+                    self.new_synopsis.emit(refined_synopsis)
+                    
                     # Log every 100 tokens to avoid spam
                     if refinement_token_count % 100 == 0:
                         self.log_update.emit(f"[Feedback Refinement] {refinement_token_count} tokens received...")
@@ -489,22 +597,20 @@ class BackgroundThread(QtCore.QThread):
                 self.log_update.emit(f"Warning: Error processing refinement chunk: {str(e)}")
                 continue
         
-        # Update synopsis with refined version
+        # Final update with complete refined synopsis
         if refined_synopsis:
             self.synopsis = refined_synopsis
             refined_word_count = len(self.synopsis.split())
             
-            # Save refined synopsis
+            # Save refined synopsis to refined_synopsis.txt
             project_path = parent_window.current_project['path']
-            summaries_path = os.path.join(project_path, 'summaries.txt')
-            with open(summaries_path, 'w', encoding='utf-8') as f:
-                f.write("=== SYNOPSIS (REFINED WITH FEEDBACK) ===\n\n")
+            refined_synopsis_path = os.path.join(project_path, 'refined_synopsis.txt')
+            with open(refined_synopsis_path, 'w', encoding='utf-8') as f:
                 f.write(self.synopsis)
-                f.write("\n\n=== END SYNOPSIS ===\n")
             
             self.log_update.emit(f"Synopsis refinement complete: {refined_word_count} words ({refinement_token_count} tokens)")
             
-            # Emit new_synopsis signal to update UI and loop back to approval
+            # Final emit for consistency (already emitted all tokens, but ensure complete state)
             self.new_synopsis.emit(self.synopsis)
     
     def generate_outline(self, content_type):
@@ -522,6 +628,10 @@ class BackgroundThread(QtCore.QThread):
         if not hasattr(parent_window, 'current_project') or not parent_window.current_project:
             self.log_update.emit("Error: No active project for outline generation")
             return
+        
+        if not self.synopsis:
+            # Try to load synopsis from project files
+            self.load_synopsis_from_project(parent_window.current_project['path'])
         
         if not self.synopsis:
             self.log_update.emit("Error: No synopsis available for outline generation")
@@ -561,7 +671,7 @@ class BackgroundThread(QtCore.QThread):
         # Use retry helper for outline generation
         outline_stream = self._generate_with_retry(
             parent_window,
-            model='gemma3:12b',
+            model=self.llm_model,
             prompt=outline_prompt,
             max_retries=3
         )
@@ -635,14 +745,42 @@ class BackgroundThread(QtCore.QThread):
             return
         
         if not self.synopsis:
+            self.load_synopsis_from_project(parent_window.current_project['path'])
+        
+        if not self.synopsis:
             self.log_update.emit("Error: No synopsis available for outline refinement")
             return
         
-        # Generate outline refinement prompt with feedback
+        # Load the current outline for context
+        current_outline = ""
+        if hasattr(parent_window, 'outline_display'):
+            current_outline = parent_window.outline_display.toPlainText().strip()
+        
+        if not current_outline:
+            # Try loading from file
+            outline_file = os.path.join(parent_window.current_project['path'], 'outline.txt')
+            if os.path.exists(outline_file):
+                try:
+                    with open(outline_file, 'r', encoding='utf-8') as f:
+                        current_outline = f.read().strip()
+                except Exception as e:
+                    self.log_update.emit(f"Warning: Could not load outline from file: {str(e)}")
+        
+        if not current_outline:
+            self.log_update.emit("Error: No outline available for refinement")
+            return
+        
+        # Generate outline refinement prompt WITH FULL CONTEXT
         refinement_prompt = (
-            f"Revise outline based on feedback: \"{feedback}\". "
-            f"Keep tone and structure. "
-            f"Return ONLY the revised outline, no explanation or preamble."
+            f"Refine this novel outline based on the following feedback:\n\n"
+            f"SYNOPSIS:\n{self.synopsis}\n\n"
+            f"CURRENT OUTLINE:\n{current_outline}\n\n"
+            f"USER FEEDBACK:\n{feedback}\n\n"
+            f"INSTRUCTIONS:\n"
+            f"- Incorporate the feedback while maintaining story coherence\n"
+            f"- Keep the overall structure and tone\n"
+            f"- Ensure chapters still align with the synopsis\n"
+            f"- Return ONLY the revised outline, no explanation or preamble."
         )
         
         self.log_update.emit("Starting outline refinement with user feedback...")
@@ -658,7 +796,7 @@ class BackgroundThread(QtCore.QThread):
         # Use retry helper for outline refinement
         refinement_stream = self._generate_with_retry(
             parent_window,
-            model='gemma3:12b',
+            model=self.llm_model,
             prompt=refinement_prompt,
             max_retries=3
         )
@@ -668,9 +806,12 @@ class BackgroundThread(QtCore.QThread):
             return
         
         try:
-            # Collect refined tokens
+            # Stream refined tokens in REAL-TIME for live display updates
             for chunk in refinement_stream:
                 try:
+                    # Check for pause
+                    self.wait_while_paused()
+                    
                     # Handle both dict and GenerateResponse object formats
                     token = None
                     
@@ -683,6 +824,9 @@ class BackgroundThread(QtCore.QThread):
                         refined_outline += token
                         outline_token_count += 1
                         
+                        # EMIT EVERY TOKEN for live streaming
+                        self.new_outline.emit(refined_outline)
+                        
                         # Log every 100 tokens to avoid spam
                         if outline_token_count % 100 == 0:
                             self.log_update.emit(f"[Outline Refinement] {outline_token_count} tokens received...")
@@ -691,7 +835,7 @@ class BackgroundThread(QtCore.QThread):
                     self.log_update.emit(f"Warning: Error processing outline refinement chunk: {str(e)}")
                     continue
             
-            # Update outline with refined version
+            # Final processing with refined version
             if refined_outline:
                 project_path = parent_window.current_project['path']
                 outline_path = os.path.join(project_path, 'outline.txt')
@@ -703,7 +847,7 @@ class BackgroundThread(QtCore.QThread):
                 refined_word_count = len(refined_outline.split())
                 self.log_update.emit(f"Outline refinement complete: {refined_word_count} words ({outline_token_count} tokens)")
                 
-                # Emit new_outline signal to update UI and loop back to approval
+                # Final emit for consistency
                 self.new_outline.emit(refined_outline)
         
         except Exception as e:
@@ -742,6 +886,10 @@ class BackgroundThread(QtCore.QThread):
         
         # Get synopsis for context
         if not self.synopsis:
+            # Try to load synopsis from project files
+            self.load_synopsis_from_project(project_path)
+        
+        if not self.synopsis:
             self.log_update.emit("Error: No synopsis available for character generation")
             return
         
@@ -760,7 +908,7 @@ class BackgroundThread(QtCore.QThread):
         
         character_stream = self._generate_with_retry(
             parent_window,
-            model='gemma3:12b',
+            model=self.llm_model,
             prompt=character_prompt,
             max_retries=3
         )
@@ -833,25 +981,43 @@ class BackgroundThread(QtCore.QThread):
             self.log_update.emit("Error: No active project for character refinement")
             return
         
-        # Get current characters from file
+        # Ensure we have the synopsis context
+        if not self.synopsis:
+            self.load_synopsis_from_project(parent_window.current_project['path'])
+        
+        # Get current characters from file or display
         project_path = parent_window.current_project['path']
-        characters_path = os.path.join(project_path, 'characters.txt')
+        characters_content = ""
         
-        try:
-            with open(characters_path, 'r', encoding='utf-8') as f:
-                characters_content = f.read()
-        except Exception as e:
-            self.log_update.emit(f"Error reading characters: {str(e)}")
-            return
+        # Try to get from display first
+        if hasattr(parent_window, 'characters_display'):
+            characters_content = parent_window.characters_display.toPlainText().strip()
         
-        if not characters_content.strip():
+        # If not in display, read from file
+        if not characters_content:
+            characters_path = os.path.join(project_path, 'characters.txt')
+            try:
+                with open(characters_path, 'r', encoding='utf-8') as f:
+                    characters_content = f.read().strip()
+            except Exception as e:
+                self.log_update.emit(f"Error reading characters: {str(e)}")
+                return
+        
+        if not characters_content:
             self.log_update.emit("Error: Characters are empty")
             return
         
-        # Generate character refinement prompt with feedback
+        # Generate character refinement prompt WITH FULL CONTEXT
         refinement_prompt = (
-            f"Revise character profiles with feedback: \"{feedback}\". "
-            f"Output valid JSON."
+            f"Refine the character profiles based on the following feedback:\n\n"
+            f"SYNOPSIS:\n{self.synopsis}\n\n"
+            f"CURRENT CHARACTERS:\n{characters_content}\n\n"
+            f"USER FEEDBACK:\n{feedback}\n\n"
+            f"INSTRUCTIONS:\n"
+            f"- Incorporate feedback while maintaining consistency with synopsis\n"
+            f"- Keep character arcs and relationships coherent\n"
+            f"- Ensure character depth matches story requirements\n"
+            f"- Return ONLY valid JSON array of character objects, no explanation or preamble."
         )
         
         self.log_update.emit("Starting character refinement with user feedback...")
@@ -861,7 +1027,7 @@ class BackgroundThread(QtCore.QThread):
         
         refinement_stream = self._generate_with_retry(
             parent_window,
-            model='gemma3:12b',
+            model=self.llm_model,
             prompt=refinement_prompt,
             max_retries=3
         )
@@ -872,9 +1038,12 @@ class BackgroundThread(QtCore.QThread):
         
         try:
             
-            # Collect refined tokens
+            # Stream refined tokens in REAL-TIME for live display updates
             for chunk in refinement_stream:
                 try:
+                    # Check for pause
+                    self.wait_while_paused()
+                    
                     # Handle both dict and GenerateResponse object formats
                     token = None
                     
@@ -887,6 +1056,9 @@ class BackgroundThread(QtCore.QThread):
                         refined_characters += token
                         characters_token_count += 1
                         
+                        # EMIT EVERY TOKEN for live streaming
+                        self.new_characters.emit(refined_characters)
+                        
                         # Log every 100 tokens to avoid spam
                         if characters_token_count % 100 == 0:
                             self.log_update.emit(f"[Character Refinement] {characters_token_count} tokens received...")
@@ -895,7 +1067,7 @@ class BackgroundThread(QtCore.QThread):
                     self.log_update.emit(f"Warning: Error processing character refinement chunk: {str(e)}")
                     continue
             
-            # Update characters with refined version
+            # Final processing with refined version
             if refined_characters:
                 with open(characters_path, 'w', encoding='utf-8') as f:
                     f.write("=== MAIN CHARACTERS (JSON - REFINED) ===\n\n")
@@ -905,7 +1077,7 @@ class BackgroundThread(QtCore.QThread):
                 refined_word_count = len(refined_characters.split())
                 self.log_update.emit(f"Character refinement complete: {refined_word_count} words ({characters_token_count} tokens)")
                 
-                # Emit new_characters signal to update UI and loop back to approval
+                # Final emit for consistency
                 self.new_characters.emit(refined_characters)
         
         except Exception as e:
@@ -957,7 +1129,7 @@ class BackgroundThread(QtCore.QThread):
         
         world_stream = self._generate_with_retry(
             parent_window,
-            model='gemma3:12b',
+            model=self.llm_model,
             prompt=world_prompt,
             max_retries=3
         )
@@ -1030,25 +1202,43 @@ class BackgroundThread(QtCore.QThread):
             self.log_update.emit("Error: No active project for world refinement")
             return
         
-        # Get current world from file
+        # Ensure we have the synopsis context
+        if not self.synopsis:
+            self.load_synopsis_from_project(parent_window.current_project['path'])
+        
+        # Get current world from display or file
         project_path = parent_window.current_project['path']
-        world_path = os.path.join(project_path, 'world.txt')
+        world_content = ""
         
-        try:
-            with open(world_path, 'r', encoding='utf-8') as f:
-                world_content = f.read()
-        except Exception as e:
-            self.log_update.emit(f"Error reading world: {str(e)}")
-            return
+        # Try to get from display first
+        if hasattr(parent_window, 'world_display'):
+            world_content = parent_window.world_display.toPlainText().strip()
         
-        if not world_content.strip():
+        # If not in display, read from file
+        if not world_content:
+            world_path = os.path.join(project_path, 'world.txt')
+            try:
+                with open(world_path, 'r', encoding='utf-8') as f:
+                    world_content = f.read().strip()
+            except Exception as e:
+                self.log_update.emit(f"Error reading world: {str(e)}")
+                return
+        
+        if not world_content:
             self.log_update.emit("Error: World is empty")
             return
         
-        # Generate world refinement prompt with feedback
+        # Generate world refinement prompt WITH FULL CONTEXT
         refinement_prompt = (
-            f"Revise world-building details with feedback: \"{feedback}\". "
-            f"Output valid JSON."
+            f"Refine the world-building details based on the following feedback:\n\n"
+            f"SYNOPSIS:\n{self.synopsis}\n\n"
+            f"CURRENT WORLD:\n{world_content}\n\n"
+            f"USER FEEDBACK:\n{feedback}\n\n"
+            f"INSTRUCTIONS:\n"
+            f"- Incorporate feedback while maintaining consistency with synopsis\n"
+            f"- Ensure world rules and magic systems remain coherent\n"
+            f"- Check for internal consistency and logical worldbuilding\n"
+            f"- Return ONLY valid JSON object with world details, no explanation or preamble."
         )
         
         self.log_update.emit("Starting world refinement with user feedback...")
@@ -1058,7 +1248,7 @@ class BackgroundThread(QtCore.QThread):
         
         refinement_stream = self._generate_with_retry(
             parent_window,
-            model='gemma3:12b',
+            model=self.llm_model,
             prompt=refinement_prompt,
             max_retries=3
         )
@@ -1069,9 +1259,12 @@ class BackgroundThread(QtCore.QThread):
         
         try:
             
-            # Collect refined tokens
+            # Stream refined tokens in REAL-TIME for live display updates
             for chunk in refinement_stream:
                 try:
+                    # Check for pause
+                    self.wait_while_paused()
+                    
                     # Handle both dict and GenerateResponse object formats
                     token = None
                     
@@ -1084,6 +1277,9 @@ class BackgroundThread(QtCore.QThread):
                         refined_world += token
                         world_token_count += 1
                         
+                        # EMIT EVERY TOKEN for live streaming
+                        self.new_world.emit(refined_world)
+                        
                         # Log every 100 tokens to avoid spam
                         if world_token_count % 100 == 0:
                             self.log_update.emit(f"[World Refinement] {world_token_count} tokens received...")
@@ -1092,7 +1288,7 @@ class BackgroundThread(QtCore.QThread):
                     self.log_update.emit(f"Warning: Error processing world refinement chunk: {str(e)}")
                     continue
             
-            # Update world with refined version
+            # Final processing with refined version
             if refined_world:
                 with open(world_path, 'w', encoding='utf-8') as f:
                     f.write("=== WORLD BUILDING (JSON - REFINED) ===\n\n")
@@ -1102,7 +1298,7 @@ class BackgroundThread(QtCore.QThread):
                 refined_word_count = len(refined_world.split())
                 self.log_update.emit(f"World refinement complete: {refined_word_count} words ({world_token_count} tokens)")
                 
-                # Emit new_world signal to update UI and loop back to approval
+                # Final emit for consistency
                 self.new_world.emit(refined_world)
         
         except Exception as e:
@@ -1162,7 +1358,7 @@ class BackgroundThread(QtCore.QThread):
         
         timeline_stream = self._generate_with_retry(
             parent_window,
-            model='gemma3:12b',
+            model=self.llm_model,
             prompt=timeline_prompt,
             max_retries=3
         )
@@ -1231,18 +1427,29 @@ class BackgroundThread(QtCore.QThread):
             self.log_update.emit("Error: No active project for timeline refinement")
             return
         
-        # Get current timeline from file
+        # Ensure we have the synopsis context
+        if not self.synopsis:
+            self.load_synopsis_from_project(parent_window.current_project['path'])
+        
+        # Get current timeline from display or file
         project_path = parent_window.current_project['path']
-        timeline_path = os.path.join(project_path, 'timeline.txt')
+        timeline_content = ""
         
-        try:
-            with open(timeline_path, 'r', encoding='utf-8') as f:
-                timeline_content = f.read()
-        except Exception as e:
-            self.log_update.emit(f"Error reading timeline: {str(e)}")
-            return
+        # Try to get from display first
+        if hasattr(parent_window, 'timeline_display'):
+            timeline_content = parent_window.timeline_display.toPlainText().strip()
         
-        if not timeline_content.strip():
+        # If not in display, read from file
+        if not timeline_content:
+            timeline_path = os.path.join(project_path, 'timeline.txt')
+            try:
+                with open(timeline_path, 'r', encoding='utf-8') as f:
+                    timeline_content = f.read().strip()
+            except Exception as e:
+                self.log_update.emit(f"Error reading timeline: {str(e)}")
+                return
+        
+        if not timeline_content:
             self.log_update.emit("Error: Timeline is empty")
             return
         
@@ -1251,11 +1458,18 @@ class BackgroundThread(QtCore.QThread):
         if refinement_signal:
             refinement_signal.emit()
         
-        # Generate timeline refinement prompt with feedback
+        # Generate timeline refinement prompt WITH FULL CONTEXT
         refinement_prompt = (
-            f"Revise timeline with feedback: \"{feedback}\". "
-            f"Fix any issues. Keep dates, locations, character arcs consistent. "
-            f"Return only the refined timeline, no explanation or preamble."
+            f"Refine the timeline based on the following feedback:\n\n"
+            f"SYNOPSIS:\n{self.synopsis}\n\n"
+            f"CURRENT TIMELINE:\n{timeline_content}\n\n"
+            f"USER FEEDBACK:\n{feedback}\n\n"
+            f"INSTRUCTIONS:\n"
+            f"- Incorporate feedback while maintaining consistency with synopsis\n"
+            f"- Ensure dates, locations, and events are logically ordered\n"
+            f"- Verify character arcs align with timeline events\n"
+            f"- Keep all dates and event details consistent\n"
+            f"- Return ONLY the refined timeline, no explanation or preamble."
         )
         
         self.log_update.emit("Starting timeline refinement with user feedback...")
@@ -1265,7 +1479,7 @@ class BackgroundThread(QtCore.QThread):
         
         refinement_stream = self._generate_with_retry(
             parent_window,
-            model='gemma3:12b',
+            model=self.llm_model,
             prompt=refinement_prompt,
             max_retries=3
         )
@@ -1276,9 +1490,12 @@ class BackgroundThread(QtCore.QThread):
         
         try:
             
-            # Collect refined tokens
+            # Stream refined tokens in REAL-TIME for live display updates
             for chunk in refinement_stream:
                 try:
+                    # Check for pause
+                    self.wait_while_paused()
+                    
                     # Handle both dict and GenerateResponse object formats
                     token = None
                     
@@ -1291,6 +1508,9 @@ class BackgroundThread(QtCore.QThread):
                         refined_timeline += token
                         timeline_token_count += 1
                         
+                        # EMIT EVERY TOKEN for live streaming
+                        self.new_timeline.emit(refined_timeline)
+                        
                         # Log every 100 tokens to avoid spam
                         if timeline_token_count % 100 == 0:
                             self.log_update.emit(f"[Timeline Refinement] {timeline_token_count} tokens received...")
@@ -1299,7 +1519,7 @@ class BackgroundThread(QtCore.QThread):
                     self.log_update.emit(f"Warning: Error processing timeline refinement chunk: {str(e)}")
                     continue
             
-            # Update timeline with refined version
+            # Final processing with refined version
             if refined_timeline:
                 with open(timeline_path, 'w', encoding='utf-8') as f:
                     f.write("=== NOVEL TIMELINE (WITH DATES, LOCATIONS, EVENTS - REFINED) ===\n\n")
@@ -1309,7 +1529,7 @@ class BackgroundThread(QtCore.QThread):
                 refined_word_count = len(refined_timeline.split())
                 self.log_update.emit(f"Timeline refinement complete: {refined_word_count} words ({timeline_token_count} tokens)")
                 
-                # Emit new_timeline signal to update UI and loop back to approval
+                # Final emit for consistency
                 self.new_timeline.emit(refined_timeline)
         
         except Exception as e:
@@ -1336,11 +1556,22 @@ class BackgroundThread(QtCore.QThread):
             self.log_update.emit("Error: No section content in buffer for refinement")
             return
         
-        # Generate section refinement prompt with feedback
+        # Ensure we have the synopsis context for consistency
+        if not self.synopsis:
+            self.load_synopsis_from_project(parent_window.current_project['path'])
+        
+        # Generate section refinement prompt WITH FULL CONTEXT
         refinement_prompt = (
-            f'Rewrite the section "{self.buffer}" incorporating changes: "{feedback}". '
-            f"Re-check vocabulary and plot consistency. "
-            f"Return ONLY the revised section, no explanation or preamble."
+            f"Refine this draft section based on the following feedback:\n\n"
+            f"SYNOPSIS:\n{self.synopsis}\n\n"
+            f"CURRENT SECTION:\n{self.buffer}\n\n"
+            f"USER FEEDBACK:\n{feedback}\n\n"
+            f"INSTRUCTIONS:\n"
+            f"- Incorporate the feedback while maintaining story coherence\n"
+            f"- Ensure the section flows naturally and maintains tone\n"
+            f"- Check vocabulary for overuse and improve sentence variety\n"
+            f"- Verify plot consistency with the synopsis\n"
+            f"- Return ONLY the revised section, no explanation or preamble."
         )
         
         self.log_update.emit(f"Starting section refinement with user feedback...")
@@ -1349,7 +1580,7 @@ class BackgroundThread(QtCore.QThread):
         
         refinement_stream = self._generate_with_retry(
             parent_window,
-            model='gemma3:12b',
+            model=self.llm_model,
             prompt=refinement_prompt,
             max_retries=3
         )
@@ -1360,9 +1591,12 @@ class BackgroundThread(QtCore.QThread):
         
         try:
             
-            # Collect refined tokens
+            # Stream refined tokens in REAL-TIME from main refinement phase
             for chunk in refinement_stream:
                 try:
+                    # Check for pause
+                    self.wait_while_paused()
+                    
                     # Handle both dict and GenerateResponse object formats
                     token = None
                     
@@ -1374,6 +1608,9 @@ class BackgroundThread(QtCore.QThread):
                     if token:
                         refined_section += token
                         section_token_count += 1
+                        
+                        # EMIT EVERY TOKEN for live streaming during refinement
+                        self.new_draft.emit(refined_section)
                         
                         # Log every 100 tokens to avoid spam
                         if section_token_count % 100 == 0:
@@ -1397,7 +1634,7 @@ class BackgroundThread(QtCore.QThread):
                 
                 polish_stream_1 = self._generate_with_retry(
                     parent_window,
-                    model='gemma3:12b',
+                    model=self.llm_model,
                     prompt=polish_prompt_1,
                     max_retries=3
                 )
@@ -1406,6 +1643,9 @@ class BackgroundThread(QtCore.QThread):
                     if polish_stream_1 is not None and hasattr(polish_stream_1, '__iter__'):
                         for chunk in polish_stream_1:
                             try:
+                                # Check for pause
+                                self.wait_while_paused()
+                                
                                 token = None
                                 if isinstance(chunk, dict) and 'response' in chunk:
                                     token = chunk['response']
@@ -1415,6 +1655,9 @@ class BackgroundThread(QtCore.QThread):
                                 if token:
                                     polished_section += token
                                     polish_token_count_1 += 1
+                                    
+                                    # EMIT TOKENS from polish pass 1
+                                    self.new_draft.emit(polished_section)
                             except Exception as e:
                                 continue
                         
@@ -1437,7 +1680,7 @@ class BackgroundThread(QtCore.QThread):
                 
                 polish_stream_2 = self._generate_with_retry(
                     parent_window,
-                    model='gemma3:12b',
+                    model=self.llm_model,
                     prompt=polish_prompt_2,
                     max_retries=3
                 )
@@ -1446,6 +1689,9 @@ class BackgroundThread(QtCore.QThread):
                     if polish_stream_2 is not None and hasattr(polish_stream_2, '__iter__'):
                         for chunk in polish_stream_2:
                             try:
+                                # Check for pause
+                                self.wait_while_paused()
+                                
                                 token = None
                                 if isinstance(chunk, dict) and 'response' in chunk:
                                     token = chunk['response']
@@ -1455,6 +1701,9 @@ class BackgroundThread(QtCore.QThread):
                                 if token:
                                     polished_section_2 += token
                                     polish_token_count_2 += 1
+                                    
+                                    # EMIT TOKENS from polish pass 2
+                                    self.new_draft.emit(polished_section_2)
                             except Exception as e:
                                 continue
                         
@@ -1470,7 +1719,7 @@ class BackgroundThread(QtCore.QThread):
                 refined_word_count = len(refined_section.split())
                 self.log_update.emit(f"Section refinement complete: {refined_word_count} words ({section_token_count} tokens) + 2 polish passes")
                 
-                # Emit new_draft signal to update UI and loop back to review
+                # Final emit for consistency
                 self.new_draft.emit(refined_section)
         
         except Exception as e:
@@ -1545,7 +1794,7 @@ class BackgroundThread(QtCore.QThread):
             
             summary_stream = self._generate_with_retry(
                 parent_window,
-                model='gemma3:12b',
+                model=self.llm_model,
                 prompt=full_summary_prompt,
                 max_retries=3
             )
@@ -1590,7 +1839,7 @@ class BackgroundThread(QtCore.QThread):
             
             context_stream = self._generate_with_retry(
                 parent_window,
-                model='gemma3:12b',
+                model=self.llm_model,
                 prompt=context_prompt,
                 max_retries=3
             )
@@ -1792,7 +2041,7 @@ class BackgroundThread(QtCore.QThread):
             
             check_stream = self._generate_with_retry(
                 parent_window,
-                model='gemma3:12b',
+                model=self.llm_model,
                 prompt=consistency_prompt,
                 max_retries=3
             )
@@ -1923,7 +2172,7 @@ class BackgroundThread(QtCore.QThread):
                 try:
                     research_stream = self._generate_with_retry(
                         parent_window,
-                        model='gemma3:12b',
+                        model=self.llm_model,
                         prompt=research_prompt,
                         max_retries=3
                     )
@@ -2024,7 +2273,7 @@ class BackgroundThread(QtCore.QThread):
                             
                             draft_stream = self._generate_with_retry(
                                 parent_window,
-                                model='gemma3:12b',
+                                model=self.llm_model,
                                 prompt=draft_prompt,
                                 max_retries=3
                             )
@@ -2101,7 +2350,7 @@ class BackgroundThread(QtCore.QThread):
                                     
                                     polish_stream = self._generate_with_retry(
                                         parent_window,
-                                        model='gemma3:12b',
+                                        model=self.llm_model,
                                         prompt=polish_prompt,
                                         max_retries=3
                                     )
@@ -2182,7 +2431,7 @@ class BackgroundThread(QtCore.QThread):
                                                         
                                                         enhance_stream = self._generate_with_retry(
                                                             parent_window,
-                                                            model='gemma3:12b',
+                                                            model=self.llm_model,
                                                             prompt=enhance_prompt,
                                                             max_retries=3
                                                         )
@@ -2314,6 +2563,9 @@ class ANSWindow(QtWidgets.QMainWindow):
         
         # Store current loaded project for persistence during app runtime
         self.current_project = None
+        
+        # Store references to expanded text widgets for streaming updates
+        self.expanded_text_widgets = {}
         
         # LLM connection status
         self.llm_connected = False
@@ -2614,6 +2866,26 @@ class ANSWindow(QtWidgets.QMainWindow):
         self.synopsis_display.setMaximumHeight(200)
         initial_synopsis_layout.addWidget(self.synopsis_display)
         
+        # Buttons for initial synopsis (initially disabled - enabled when synopsis is generated)
+        initial_synopsis_buttons_layout = QtWidgets.QHBoxLayout()
+        
+        self.initial_approve_button = QtWidgets.QPushButton("Approve")
+        self.initial_approve_button.setMinimumHeight(35)
+        self.initial_approve_button.setMaximumWidth(100)
+        self.initial_approve_button.setEnabled(False)
+        self.initial_approve_button.clicked.connect(self._on_approve_initial_synopsis)
+        initial_synopsis_buttons_layout.addWidget(self.initial_approve_button)
+        
+        self.initial_adjust_button = QtWidgets.QPushButton("Adjust")
+        self.initial_adjust_button.setMinimumHeight(35)
+        self.initial_adjust_button.setMaximumWidth(100)
+        self.initial_adjust_button.setEnabled(False)
+        self.initial_adjust_button.clicked.connect(self._on_adjust_initial_synopsis)
+        initial_synopsis_buttons_layout.addWidget(self.initial_adjust_button)
+        
+        initial_synopsis_buttons_layout.addStretch()
+        initial_synopsis_layout.addLayout(initial_synopsis_buttons_layout)
+        
         initial_synopsis_group.setLayout(initial_synopsis_layout)
         self.initial_synopsis_group = initial_synopsis_group
         layout.addWidget(initial_synopsis_group)
@@ -2634,6 +2906,26 @@ class ANSWindow(QtWidgets.QMainWindow):
         self.planning_synopsis_display.setMinimumHeight(120)
         self.planning_synopsis_display.setMaximumHeight(200)
         synopsis_layout.addWidget(self.planning_synopsis_display)
+        
+        # Buttons for refined synopsis
+        synopsis_buttons_layout = QtWidgets.QHBoxLayout()
+        
+        self.approve_button = QtWidgets.QPushButton("Approve")
+        self.approve_button.setMinimumHeight(35)
+        self.approve_button.setMaximumWidth(100)
+        self.approve_button.setEnabled(False)
+        self.approve_button.clicked.connect(self._on_approve_synopsis)
+        synopsis_buttons_layout.addWidget(self.approve_button)
+        
+        self.adjust_button = QtWidgets.QPushButton("Adjust")
+        self.adjust_button.setMinimumHeight(35)
+        self.adjust_button.setMaximumWidth(100)
+        self.adjust_button.setEnabled(False)
+        self.adjust_button.clicked.connect(self._on_adjust_synopsis)
+        synopsis_buttons_layout.addWidget(self.adjust_button)
+        
+        synopsis_buttons_layout.addStretch()
+        synopsis_layout.addLayout(synopsis_buttons_layout)
         
         synopsis_group.setLayout(synopsis_layout)
         self.refined_synopsis_group = synopsis_group
@@ -2656,6 +2948,26 @@ class ANSWindow(QtWidgets.QMainWindow):
         self.outline_display.setMaximumHeight(200)
         outline_layout.addWidget(self.outline_display)
         
+        # Buttons for outline
+        outline_buttons_layout = QtWidgets.QHBoxLayout()
+        
+        self.approve_outline_button = QtWidgets.QPushButton("Approve")
+        self.approve_outline_button.setMinimumHeight(35)
+        self.approve_outline_button.setMaximumWidth(100)
+        self.approve_outline_button.setEnabled(False)
+        self.approve_outline_button.clicked.connect(self._on_approve_outline)
+        outline_buttons_layout.addWidget(self.approve_outline_button)
+        
+        self.adjust_outline_button = QtWidgets.QPushButton("Adjust")
+        self.adjust_outline_button.setMinimumHeight(35)
+        self.adjust_outline_button.setMaximumWidth(100)
+        self.adjust_outline_button.setEnabled(False)
+        self.adjust_outline_button.clicked.connect(self._on_adjust_outline)
+        outline_buttons_layout.addWidget(self.adjust_outline_button)
+        
+        outline_buttons_layout.addStretch()
+        outline_layout.addLayout(outline_buttons_layout)
+        
         outline_group.setLayout(outline_layout)
         self.outline_group = outline_group
         layout.addWidget(outline_group)
@@ -2677,55 +2989,29 @@ class ANSWindow(QtWidgets.QMainWindow):
         self.characters_display.setMaximumHeight(200)
         characters_layout.addWidget(self.characters_display)
         
+        # Buttons for characters
+        characters_buttons_layout = QtWidgets.QHBoxLayout()
+        
+        self.approve_characters_button = QtWidgets.QPushButton("Approve")
+        self.approve_characters_button.setMinimumHeight(35)
+        self.approve_characters_button.setMaximumWidth(100)
+        self.approve_characters_button.setEnabled(False)
+        self.approve_characters_button.clicked.connect(self._on_approve_characters)
+        characters_buttons_layout.addWidget(self.approve_characters_button)
+        
+        self.adjust_characters_button = QtWidgets.QPushButton("Adjust")
+        self.adjust_characters_button.setMinimumHeight(35)
+        self.adjust_characters_button.setMaximumWidth(100)
+        self.adjust_characters_button.setEnabled(False)
+        self.adjust_characters_button.clicked.connect(self._on_adjust_characters)
+        characters_buttons_layout.addWidget(self.adjust_characters_button)
+        
+        characters_buttons_layout.addStretch()
+        characters_layout.addLayout(characters_buttons_layout)
+        
         characters_group.setLayout(characters_layout)
         self.characters_group = characters_group
         layout.addWidget(characters_group)
-        
-        # ===== Synopsis Action Buttons Section =====
-        synopsis_buttons_layout = QtWidgets.QHBoxLayout()
-        
-        synopsis_label = QtWidgets.QLabel("Synopsis Actions:")
-        synopsis_buttons_layout.addWidget(synopsis_label)
-        
-        self.approve_button = QtWidgets.QPushButton("Approve")
-        self.approve_button.setMinimumHeight(40)
-        self.approve_button.setMaximumWidth(120)
-        self.approve_button.setEnabled(False)
-        self.approve_button.clicked.connect(self._on_approve_synopsis)
-        synopsis_buttons_layout.addWidget(self.approve_button)
-        
-        self.adjust_button = QtWidgets.QPushButton("Adjust")
-        self.adjust_button.setMinimumHeight(40)
-        self.adjust_button.setMaximumWidth(120)
-        self.adjust_button.setEnabled(False)
-        self.adjust_button.clicked.connect(self._on_adjust_synopsis)
-        synopsis_buttons_layout.addWidget(self.adjust_button)
-        
-        synopsis_buttons_layout.addStretch()
-        layout.addLayout(synopsis_buttons_layout)
-        
-        # ===== Outline Action Buttons Section =====
-        outline_buttons_layout = QtWidgets.QHBoxLayout()
-        
-        outline_label = QtWidgets.QLabel("Outline Actions:")
-        outline_buttons_layout.addWidget(outline_label)
-        
-        self.approve_outline_button = QtWidgets.QPushButton("Approve")
-        self.approve_outline_button.setMinimumHeight(40)
-        self.approve_outline_button.setMaximumWidth(120)
-        self.approve_outline_button.setEnabled(False)
-        self.approve_outline_button.clicked.connect(self._on_approve_outline)
-        outline_buttons_layout.addWidget(self.approve_outline_button)
-        
-        self.adjust_outline_button = QtWidgets.QPushButton("Adjust")
-        self.adjust_outline_button.setMinimumHeight(40)
-        self.adjust_outline_button.setMaximumWidth(120)
-        self.adjust_outline_button.setEnabled(False)
-        self.adjust_outline_button.clicked.connect(self._on_adjust_outline)
-        outline_buttons_layout.addWidget(self.adjust_outline_button)
-        
-        outline_buttons_layout.addStretch()
-        layout.addLayout(outline_buttons_layout)
         
         # ===== World Section =====
         world_group = QtWidgets.QGroupBox("Generated World")
@@ -2744,55 +3030,29 @@ class ANSWindow(QtWidgets.QMainWindow):
         self.world_display.setMaximumHeight(200)
         world_layout.addWidget(self.world_display)
         
-        world_group.setLayout(world_layout)
-        self.world_group = world_group
-        layout.addWidget(world_group)
-        
-        # ===== Characters Action Buttons Section =====
-        characters_buttons_layout = QtWidgets.QHBoxLayout()
-        
-        characters_label = QtWidgets.QLabel("Characters Actions:")
-        characters_buttons_layout.addWidget(characters_label)
-        
-        self.approve_characters_button = QtWidgets.QPushButton("Approve")
-        self.approve_characters_button.setMinimumHeight(40)
-        self.approve_characters_button.setMaximumWidth(120)
-        self.approve_characters_button.setEnabled(False)
-        self.approve_characters_button.clicked.connect(self._on_approve_characters)
-        characters_buttons_layout.addWidget(self.approve_characters_button)
-        
-        self.adjust_characters_button = QtWidgets.QPushButton("Adjust")
-        self.adjust_characters_button.setMinimumHeight(40)
-        self.adjust_characters_button.setMaximumWidth(120)
-        self.adjust_characters_button.setEnabled(False)
-        self.adjust_characters_button.clicked.connect(self._on_adjust_characters)
-        characters_buttons_layout.addWidget(self.adjust_characters_button)
-        
-        characters_buttons_layout.addStretch()
-        layout.addLayout(characters_buttons_layout)
-        
-        # ===== World Action Buttons Section =====
+        # Buttons for world
         world_buttons_layout = QtWidgets.QHBoxLayout()
         
-        world_label = QtWidgets.QLabel("World Actions:")
-        world_buttons_layout.addWidget(world_label)
-        
         self.approve_world_button = QtWidgets.QPushButton("Approve")
-        self.approve_world_button.setMinimumHeight(40)
-        self.approve_world_button.setMaximumWidth(120)
+        self.approve_world_button.setMinimumHeight(35)
+        self.approve_world_button.setMaximumWidth(100)
         self.approve_world_button.setEnabled(False)
         self.approve_world_button.clicked.connect(self._on_approve_world)
         world_buttons_layout.addWidget(self.approve_world_button)
         
         self.adjust_world_button = QtWidgets.QPushButton("Adjust")
-        self.adjust_world_button.setMinimumHeight(40)
-        self.adjust_world_button.setMaximumWidth(120)
+        self.adjust_world_button.setMinimumHeight(35)
+        self.adjust_world_button.setMaximumWidth(100)
         self.adjust_world_button.setEnabled(False)
         self.adjust_world_button.clicked.connect(self._on_adjust_world)
         world_buttons_layout.addWidget(self.adjust_world_button)
         
         world_buttons_layout.addStretch()
-        layout.addLayout(world_buttons_layout)
+        world_layout.addLayout(world_buttons_layout)
+        
+        world_group.setLayout(world_layout)
+        self.world_group = world_group
+        layout.addWidget(world_group)
         
         # ===== Timeline Section =====
         timeline_group = QtWidgets.QGroupBox("Generated Timeline")
@@ -2811,32 +3071,29 @@ class ANSWindow(QtWidgets.QMainWindow):
         self.timeline_display.setMaximumHeight(200)
         timeline_layout.addWidget(self.timeline_display)
         
-        timeline_group.setLayout(timeline_layout)
-        self.timeline_group = timeline_group
-        layout.addWidget(timeline_group)
-        
-        # ===== Timeline Action Buttons Section =====
+        # Buttons for timeline
         timeline_buttons_layout = QtWidgets.QHBoxLayout()
         
-        timeline_label = QtWidgets.QLabel("Timeline Actions:")
-        timeline_buttons_layout.addWidget(timeline_label)
-        
         self.approve_timeline_button = QtWidgets.QPushButton("Approve")
-        self.approve_timeline_button.setMinimumHeight(40)
-        self.approve_timeline_button.setMaximumWidth(120)
+        self.approve_timeline_button.setMinimumHeight(35)
+        self.approve_timeline_button.setMaximumWidth(100)
         self.approve_timeline_button.setEnabled(False)
         self.approve_timeline_button.clicked.connect(self._on_approve_timeline)
         timeline_buttons_layout.addWidget(self.approve_timeline_button)
         
         self.adjust_timeline_button = QtWidgets.QPushButton("Adjust")
-        self.adjust_timeline_button.setMinimumHeight(40)
-        self.adjust_timeline_button.setMaximumWidth(120)
+        self.adjust_timeline_button.setMinimumHeight(35)
+        self.adjust_timeline_button.setMaximumWidth(100)
         self.adjust_timeline_button.setEnabled(False)
         self.adjust_timeline_button.clicked.connect(self._on_adjust_timeline)
         timeline_buttons_layout.addWidget(self.adjust_timeline_button)
         
         timeline_buttons_layout.addStretch()
-        layout.addLayout(timeline_buttons_layout)
+        timeline_layout.addLayout(timeline_buttons_layout)
+        
+        timeline_group.setLayout(timeline_layout)
+        self.timeline_group = timeline_group
+        layout.addWidget(timeline_group)
         
         layout.addStretch()
         
@@ -3116,6 +3373,81 @@ class ANSWindow(QtWidgets.QMainWindow):
         app_group.setLayout(app_layout)
         layout.addWidget(app_group)
         
+        # ===== Generation Parameters Group =====
+        gen_group = QtWidgets.QGroupBox("Generation Parameters")
+        gen_layout = QtWidgets.QVBoxLayout()
+        
+        # Max retries
+        retries_layout = QtWidgets.QHBoxLayout()
+        retries_label = QtWidgets.QLabel("Max LLM Retries:")
+        self.max_retries_spinbox = QtWidgets.QSpinBox()
+        self.max_retries_spinbox.setMinimum(1)
+        self.max_retries_spinbox.setMaximum(10)
+        self.max_retries_spinbox.setValue(3)
+        retries_layout.addWidget(retries_label)
+        retries_layout.addWidget(self.max_retries_spinbox)
+        retries_layout.addStretch()
+        gen_layout.addLayout(retries_layout)
+        
+        # Detail level
+        detail_layout = QtWidgets.QHBoxLayout()
+        detail_label = QtWidgets.QLabel("Detail Level:")
+        self.detail_combo = QtWidgets.QComboBox()
+        self.detail_combo.addItems(["Concise", "Balanced", "Detailed"])
+        self.detail_combo.setCurrentText("Balanced")
+        detail_layout.addWidget(detail_label)
+        detail_layout.addWidget(self.detail_combo)
+        detail_layout.addStretch()
+        gen_layout.addLayout(detail_layout)
+        
+        # Character depth
+        char_layout = QtWidgets.QHBoxLayout()
+        char_label = QtWidgets.QLabel("Character Depth:")
+        self.char_depth_combo = QtWidgets.QComboBox()
+        self.char_depth_combo.addItems(["Shallow", "Standard", "Deep"])
+        self.char_depth_combo.setCurrentText("Standard")
+        char_layout.addWidget(char_label)
+        char_layout.addWidget(self.char_depth_combo)
+        char_layout.addStretch()
+        gen_layout.addLayout(char_layout)
+        
+        # World depth
+        world_layout = QtWidgets.QHBoxLayout()
+        world_label = QtWidgets.QLabel("World-building Depth:")
+        self.world_depth_combo = QtWidgets.QComboBox()
+        self.world_depth_combo.addItems(["Minimal", "Standard", "Comprehensive"])
+        self.world_depth_combo.setCurrentText("Standard")
+        world_layout.addWidget(world_label)
+        world_layout.addWidget(self.world_depth_combo)
+        world_layout.addStretch()
+        gen_layout.addLayout(world_layout)
+        
+        # Quality check
+        quality_layout = QtWidgets.QHBoxLayout()
+        quality_label = QtWidgets.QLabel("Quality Check Level:")
+        self.quality_combo = QtWidgets.QComboBox()
+        self.quality_combo.addItems(["Strict", "Moderate", "Lenient"])
+        self.quality_combo.setCurrentText("Moderate")
+        quality_layout.addWidget(quality_label)
+        quality_layout.addWidget(self.quality_combo)
+        quality_layout.addStretch()
+        gen_layout.addLayout(quality_layout)
+        
+        # Sections per chapter
+        sections_layout = QtWidgets.QHBoxLayout()
+        sections_label = QtWidgets.QLabel("Sections Per Chapter:")
+        self.sections_spinbox = QtWidgets.QSpinBox()
+        self.sections_spinbox.setMinimum(1)
+        self.sections_spinbox.setMaximum(10)
+        self.sections_spinbox.setValue(3)
+        sections_layout.addWidget(sections_label)
+        sections_layout.addWidget(self.sections_spinbox)
+        sections_layout.addStretch()
+        gen_layout.addLayout(sections_layout)
+        
+        gen_group.setLayout(gen_layout)
+        layout.addWidget(gen_group)
+        
         # ===== Info Group =====
         info_group = QtWidgets.QGroupBox("Application Info")
         info_layout = QtWidgets.QVBoxLayout()
@@ -3137,6 +3469,18 @@ class ANSWindow(QtWidgets.QMainWindow):
         
         # Load settings from config
         self._load_settings()
+        
+        # Connect change signals to save settings
+        self.model_combo.currentTextChanged.connect(self._save_settings)
+        self.autosave_spinbox.valueChanged.connect(self._save_settings)
+        self.notifications_checkbox.stateChanged.connect(self._save_settings)
+        self.autoapproval_checkbox.stateChanged.connect(self._save_settings)
+        self.max_retries_spinbox.valueChanged.connect(self._save_settings)
+        self.detail_combo.currentTextChanged.connect(self._save_settings)
+        self.char_depth_combo.currentTextChanged.connect(self._save_settings)
+        self.world_depth_combo.currentTextChanged.connect(self._save_settings)
+        self.quality_combo.currentTextChanged.connect(self._save_settings)
+        self.sections_spinbox.valueChanged.connect(self._save_settings)
         
         return tab
     
@@ -3228,6 +3572,7 @@ class ANSWindow(QtWidgets.QMainWindow):
         """Update temperature value label when slider changes."""
         temp_value = value / 100.0
         self.temperature_value_label.setText(f"{temp_value:.2f}")
+        self._save_settings()
     
     def _on_about_clicked(self):
         """Show about dialog with application information."""
@@ -3374,6 +3719,24 @@ class ANSWindow(QtWidgets.QMainWindow):
                         elif 'AutoApproval:' in line:
                             autoapproval = line.split('AutoApproval:')[1].strip() == 'True'
                             self.autoapproval_checkbox.setChecked(autoapproval)
+                        elif 'MaxRetries:' in line:
+                            max_retries = int(line.split('MaxRetries:')[1].strip())
+                            self.max_retries_spinbox.setValue(max_retries)
+                        elif 'DetailLevel:' in line:
+                            detail = line.split('DetailLevel:')[1].strip()
+                            self.detail_combo.setCurrentText(detail.capitalize())
+                        elif 'CharacterDepth:' in line:
+                            char_depth = line.split('CharacterDepth:')[1].strip()
+                            self.char_depth_combo.setCurrentText(char_depth.capitalize())
+                        elif 'WorldDepth:' in line:
+                            world_depth = line.split('WorldDepth:')[1].strip()
+                            self.world_depth_combo.setCurrentText(world_depth.capitalize())
+                        elif 'QualityCheck:' in line:
+                            quality = line.split('QualityCheck:')[1].strip()
+                            self.quality_combo.setCurrentText(quality.capitalize())
+                        elif 'SectionsPerChapter:' in line:
+                            sections = int(line.split('SectionsPerChapter:')[1].strip())
+                            self.sections_spinbox.setValue(sections)
         except Exception as e:
             print(f"Error loading settings: {e}")
     
@@ -3392,6 +3755,12 @@ Temperature: {self.temperature_slider.value() / 100.0}
 AutoSave: {self.autosave_spinbox.value()}
 Notifications: {self.notifications_checkbox.isChecked()}
 AutoApproval: {self.autoapproval_checkbox.isChecked()}
+MaxRetries: {self.max_retries_spinbox.value()}
+DetailLevel: {self.detail_combo.currentText().lower()}
+CharacterDepth: {self.char_depth_combo.currentText().lower()}
+WorldDepth: {self.world_depth_combo.currentText().lower()}
+QualityCheck: {self.quality_combo.currentText().lower()}
+SectionsPerChapter: {self.sections_spinbox.value()}
 """
             with open(config_path, 'w', encoding='utf-8') as f:
                 f.write(settings_content)
@@ -3411,13 +3780,26 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         """Check if auto-approval is enabled in settings."""
         return hasattr(self, 'autoapproval_checkbox') and self.autoapproval_checkbox.isChecked()
     
+    def _sync_settings_to_thread(self):
+        """Synchronize UI settings to background thread."""
+        if hasattr(self, 'thread'):
+            self.thread.llm_model = self.model_combo.currentText()
+            self.thread.temperature = self.temperature_slider.value() / 100.0
+            self.thread.max_retries = self.max_retries_spinbox.value()
+            self.thread.detail_level = self.detail_combo.currentText().lower()
+            self.thread.character_depth = self.char_depth_combo.currentText().lower()
+            self.thread.world_depth = self.world_depth_combo.currentText().lower()
+            self.thread.quality_check = self.quality_combo.currentText().lower()
+            self.thread.sections_per_chapter = self.sections_spinbox.value()
+    
     def _refresh_logs_tab(self):
-        """Refresh the logs tab with current project's logs."""
+        """Refresh the logs tab with message about app logs location."""
         if hasattr(self, 'logs_text_edit'):
-            if self.current_project and 'log' in self.current_project:
-                self.logs_text_edit.setText(self.current_project['log'])
+            # Project logs no longer stored - all logs go to Config/log1-5.txt
+            if self.current_project:
+                self.logs_text_edit.setText(f"Project: {self.current_project['name']}\n\nAll application logs are stored in Config/log1.txt through log5.txt\n(rotating log files)\n\nLogs displayed here are from the current session.")
             else:
-                self.logs_text_edit.setText("No project loaded. Load or create a project to see logs.")
+                self.logs_text_edit.setText("No project loaded.\n\nApplication logs are stored in Config/log1.txt through log5.txt\n(rotating log files)")
     
     def _update_llm_status_indicator(self):
         """Update the LLM status indicator color and text."""
@@ -3445,31 +3827,39 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         """Handle project loading when button is clicked."""
         project_name = self.project_list_combo.currentText()
         
+        self._write_app_log(f"User initiated project load: {project_name}")
+        
         if project_name == "(No projects available)":
+            self._write_app_log(f"Project load failed: no projects available")
             self.initialization_status.setText("Error: No projects available to load.")
             self.error_signal.emit("No projects available")
             return
         
         try:
             self.load_project(project_name)
+            self._write_app_log(f"Project '{project_name}' loaded successfully - session persistence active")
             self.initialization_status.setText(f"✓ Project '{project_name}' loaded successfully!\n\nProject stored in memory for session persistence.\nLocation: projects/{project_name}/")
             self.log_update.emit(f"Project '{project_name}' loaded into session")
         except Exception as e:
             error_msg = f"Error loading project: {str(e)}"
+            self._write_app_log(f"Project load failed for '{project_name}': {error_msg}")
             self.initialization_status.setText(error_msg)
             self.error_signal.emit(error_msg)
     
     def _on_run_test_prompt(self):
         """Handle test prompt execution."""
         if not self.llm_connected:
+            self._write_app_log(f"Test prompt failed: LLM not connected")
             self.initialization_status.setText("✗ Ollama is not connected yet. Please wait for connection or check logs.")
             return
         
         prompt = self.test_prompt_input.text().strip()
         if not prompt:
+            self._write_app_log(f"Test prompt failed: empty prompt")
             self.initialization_status.setText("Error: Prompt cannot be empty!")
             return
         
+        self._write_app_log(f"User initiated test prompt: '{prompt[:50]}...'")
         self.initialization_status.setText("Testing Ollama... (this may take a moment)")
         QtWidgets.QApplication.processEvents()  # Update UI immediately
         
@@ -3479,6 +3869,7 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
             test_thread.start()
         except Exception as e:
             error_msg = f"Error running test: {str(e)}"
+            self._write_app_log(f"Test prompt error: {error_msg}")
             self.initialization_status.setText(error_msg)
     
     def _run_test_prompt_thread(self, prompt):
@@ -3511,18 +3902,15 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         # Show critical error dialog
         QtWidgets.QMessageBox.critical(self, "Error", error_message)
         
-        # Log error to log.txt in app config
-        log_entry = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - ERROR: {error_message}\n"
-        app_settings_file = os.path.join('Config', 'app_settings.txt')
-        with open(app_settings_file, 'a', encoding='utf-8') as f:
-            f.write(log_entry)
+        # Log error to rotating app log
+        self._write_app_log(f"ERROR: {error_message}")
     
     def _on_start_signal(self, config_string):
         """Handle start signal with novel configuration."""
-        log_entry = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Start signal received: {config_string}\n"
-        app_settings_file = os.path.join('Config', 'app_settings.txt')
-        with open(app_settings_file, 'a', encoding='utf-8') as f:
-            f.write(log_entry)
+        # Sync settings to thread before starting
+        self._sync_settings_to_thread()
+        
+        self._write_app_log(f"Start signal received: {config_string}")
     
     def _on_processing_finished(self, result):
         """Handle background thread processing finished signal."""
@@ -3557,6 +3945,24 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
                     cursor = self.synopsis_display.textCursor()
                     cursor.movePosition(cursor.MoveOperation.End)
                     self.synopsis_display.setTextCursor(cursor)
+        
+        # Also update expanded window if it's open
+        if 'synopsis_display' in self.expanded_text_widgets:
+            expanded_text = self.expanded_text_widgets['synopsis_display']
+            current_text = expanded_text.toPlainText()
+            if len(synopsis_text) > len(current_text):
+                new_part = synopsis_text[len(current_text):]
+                expanded_text.insertPlainText(new_part)
+                # Auto-scroll to bottom
+                cursor = expanded_text.textCursor()
+                cursor.movePosition(cursor.MoveOperation.End)
+                expanded_text.setTextCursor(cursor)
+        
+        # Enable initial synopsis buttons for user review
+        if hasattr(self, 'initial_approve_button'):
+            self.initial_approve_button.setEnabled(True)
+        if hasattr(self, 'initial_adjust_button'):
+            self.initial_adjust_button.setEnabled(True)
     
     def _on_refinement_start(self):
         """Handle refinement start signal. Clear planning display and disable buttons during refinement."""
@@ -3597,15 +4003,21 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         if hasattr(self, 'planning_synopsis_display'):
             # Get current text length
             current_text = self.planning_synopsis_display.toPlainText()
+            current_length = len(current_text)
+            new_length = len(refined_synopsis_text)
             
-            # Only update if new text has been added
-            if len(refined_synopsis_text) > len(current_text):
+            # Handle display clear first (refinement_start signal clears display)
+            if new_length == 0 and current_length > 0:
+                # Display was cleared, this is a new refinement starting
+                self.planning_synopsis_display.clear()
+            elif new_length > current_length:
+                # New text has been added - stream it in
                 # Check if user is at the bottom before appending
                 scrollbar = self.planning_synopsis_display.verticalScrollBar()
                 is_at_bottom = scrollbar is not None and scrollbar.value() == scrollbar.maximum()
                 
                 # Append only the new part to preserve scroll position
-                new_part = refined_synopsis_text[len(current_text):]
+                new_part = refined_synopsis_text[current_length:]
                 self.planning_synopsis_display.insertPlainText(new_part)
                 
                 # Only auto-scroll if user was already at the bottom
@@ -3613,6 +4025,25 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
                     cursor = self.planning_synopsis_display.textCursor()
                     cursor.movePosition(cursor.MoveOperation.End)
                     self.planning_synopsis_display.setTextCursor(cursor)
+        
+        # Also update expanded window if it's open
+        if 'planning_synopsis_display' in self.expanded_text_widgets:
+            expanded_text = self.expanded_text_widgets['planning_synopsis_display']
+            current_text = expanded_text.toPlainText()
+            current_length = len(current_text)
+            new_length = len(refined_synopsis_text)
+            
+            # Handle display clear first
+            if new_length == 0 and current_length > 0:
+                expanded_text.clear()
+            elif new_length > current_length:
+                # Stream new content
+                new_part = refined_synopsis_text[current_length:]
+                expanded_text.insertPlainText(new_part)
+                # Auto-scroll to bottom
+                cursor = expanded_text.textCursor()
+                cursor.movePosition(cursor.MoveOperation.End)
+                expanded_text.setTextCursor(cursor)
         
         # Enable the Approve and Adjust buttons for synopsis
         if hasattr(self, 'approve_button'):
@@ -3650,6 +4081,18 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
                     cursor = self.outline_display.textCursor()
                     cursor.movePosition(cursor.MoveOperation.End)
                     self.outline_display.setTextCursor(cursor)
+        
+        # Also update expanded window if it's open
+        if 'outline_display' in self.expanded_text_widgets:
+            expanded_text = self.expanded_text_widgets['outline_display']
+            current_text = expanded_text.toPlainText()
+            if len(outline_text) > len(current_text):
+                new_part = outline_text[len(current_text):]
+                expanded_text.insertPlainText(new_part)
+                # Auto-scroll to bottom
+                cursor = expanded_text.textCursor()
+                cursor.movePosition(cursor.MoveOperation.End)
+                expanded_text.setTextCursor(cursor)
         
         # Enable the Approve and Adjust buttons for outline
         if hasattr(self, 'approve_outline_button'):
@@ -3744,20 +4187,11 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
                 self.adjust_timeline_button.setEnabled(True)
     
     def _on_log_update(self, log_message):
-        """Handle log update signal. Append to project log.txt and QTextEdit."""
+        """Handle log update signal. Display in Logs tab QTextEdit."""
         # Create log entry with timestamp
         log_entry = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {log_message}\n"
         
-        # If a project is loaded, append to project's log.txt
-        if self.current_project:
-            log_file = os.path.join(self.current_project['path'], 'log.txt')
-            with open(log_file, 'a', encoding='utf-8') as f:
-                f.write(log_entry)
-            
-            # Update current_project in-memory log
-            self.current_project['log'] += log_entry
-        
-        # Append to logs QTextEdit if it exists
+        # Append to logs QTextEdit if it exists (all logging now goes to Config/log1-5.txt)
         if hasattr(self, 'logs_text_edit'):
             self.logs_text_edit.append(log_entry.rstrip())
     
@@ -3793,6 +4227,13 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
     
     def _on_approve_section(self):
         """Handle Approve Section button click - emit approve_signal with 'section'."""
+        # Check if there's content in the draft display
+        if hasattr(self, 'draft_display'):
+            content = self.draft_display.toPlainText().strip()
+            if content and self.current_project:
+                self.buffer = content
+                self.current_project['buffer_backup'] = content
+        
         self.approve_signal.emit('section')
         if self.current_project:
             self.log_update.emit("Section approved. Continuing to next section...")
@@ -3806,6 +4247,11 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
     
     def _on_adjust_section(self):
         """Handle Adjust Section button click - get feedback and emit adjust_signal with 'section'."""
+        # Check if there's content to adjust
+        if not hasattr(self, 'draft_display') or not self.draft_display.toPlainText().strip():
+            self.error_signal.emit("No section content to adjust")
+            return
+        
         feedback_text, ok = QtWidgets.QInputDialog.getMultiLineText(
             self,
             "Adjust Section",
@@ -3814,6 +4260,7 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         )
         
         if ok and feedback_text.strip():
+            # Always emit signal to start refinement process
             self.adjust_signal.emit('section', feedback_text)
             if self.current_project:
                 self.log_update.emit(f"Section adjustment requested: {feedback_text[:100]}...")
@@ -3825,6 +4272,7 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
     
     def _on_pause_generation(self):
         """Handle Pause button click to pause background generation."""
+        self._write_app_log(f"User paused generation")
         self.pause_signal.emit()
         self.thread.set_paused(True)
         if self.current_project:
@@ -3839,6 +4287,7 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
     
     def _on_resume_generation(self):
         """Handle Resume button click to resume paused background generation."""
+        self._write_app_log(f"User resumed generation")
         self.thread.set_paused(False)
         if self.current_project:
             self.log_update.emit("Generation resumed.")
@@ -3857,12 +4306,16 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         word_count = self.word_count_spinbox.value()
         
         if not idea:
+            self._write_app_log(f"Novel generation failed: no idea provided")
             QtWidgets.QMessageBox.warning(self, "Warning", "Please enter a novel idea to start.")
             return
         
         if not tone:
+            self._write_app_log(f"Novel generation failed: no tone provided")
             QtWidgets.QMessageBox.warning(self, "Warning", "Please describe the desired tone.")
             return
+        
+        self._write_app_log(f"User initiated novel generation - Target: {word_count} words")
         
         # Create config string from inputs
         config_string = f"Idea: {idea}, Tone: {tone}, Soft Target: {word_count}"
@@ -3876,12 +4329,44 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
     
     def _on_approve_synopsis(self):
         """Handle Approve button click - emit approve_signal with 'synopsis'."""
+        # Check if there's content in the refined synopsis display
+        refined_content = ""
+        if hasattr(self, 'planning_synopsis_display'):
+            refined_content = self.planning_synopsis_display.toPlainText().strip()
+        
+        if not refined_content:
+            # Try initial synopsis if refined is empty
+            if hasattr(self, 'synopsis_display'):
+                refined_content = self.synopsis_display.toPlainText().strip()
+        
+        if refined_content:
+            # Update the synopsis in current_project
+            if self.current_project:
+                self.current_project['synopsis'] = refined_content
+        
         self.approve_signal.emit('synopsis')
         if self.current_project:
-            self.log_update.emit("Synopsis approved. Ready to proceed with planning.")
+            self.log_update.emit("Refined synopsis approved. Ready to proceed with planning.")
+        # Disable initial synopsis buttons
+        if hasattr(self, 'initial_approve_button'):
+            self.initial_approve_button.setEnabled(False)
+        if hasattr(self, 'initial_adjust_button'):
+            self.initial_adjust_button.setEnabled(False)
     
     def _on_adjust_synopsis(self):
         """Handle Adjust button click - get feedback and emit adjust_signal."""
+        # Check if there's content to adjust
+        current_content = ""
+        if hasattr(self, 'planning_synopsis_display'):
+            current_content = self.planning_synopsis_display.toPlainText().strip()
+        
+        if not current_content and hasattr(self, 'synopsis_display'):
+            current_content = self.synopsis_display.toPlainText().strip()
+        
+        if not current_content:
+            self.error_signal.emit("No synopsis content to adjust")
+            return
+        
         feedback_text, ok = QtWidgets.QInputDialog.getMultiLineText(
             self,
             "Adjust Synopsis",
@@ -3890,12 +4375,66 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         )
         
         if ok and feedback_text.strip():
+            # Always emit signal to start refinement process
             self.adjust_signal.emit('synopsis', feedback_text)
             if self.current_project:
-                self.log_update.emit(f"Synopsis adjustment requested: {feedback_text[:100]}...")
+                self.log_update.emit(f"Refined synopsis adjustment requested: {feedback_text[:100]}...")
+            # Disable buttons during refinement
+            if hasattr(self, 'initial_approve_button'):
+                self.initial_approve_button.setEnabled(False)
+            if hasattr(self, 'initial_adjust_button'):
+                self.initial_adjust_button.setEnabled(False)
+    
+    def _on_approve_initial_synopsis(self):
+        """Handle Approve button click for initial synopsis - can approve generated or loaded content."""
+        # Check if there's content in the initial synopsis display
+        if hasattr(self, 'synopsis_display'):
+            content = self.synopsis_display.toPlainText().strip()
+            if content:
+                # Content exists - either from generation or loaded from file
+                # Update the synopsis in current_project
+                if self.current_project:
+                    self.current_project['synopsis'] = content
+                    self.log_update.emit("Initial synopsis approved. Moving to refined synopsis review...")
+                # Route through the normal approval flow
+                self._on_approve_synopsis()
+                return
+        
+        self.error_signal.emit("No synopsis content to approve")
+    
+    def _on_adjust_initial_synopsis(self):
+        """Handle Adjust button click for initial synopsis - can adjust generated or loaded content."""
+        # Check if there's content in the initial synopsis display
+        if hasattr(self, 'synopsis_display'):
+            current_content = self.synopsis_display.toPlainText().strip()
+            if not current_content:
+                self.error_signal.emit("No synopsis content to adjust")
+                return
+            
+            feedback_text, ok = QtWidgets.QInputDialog.getMultiLineText(
+                self,
+                "Adjust Initial Synopsis",
+                "What adjustments would you like to make to the initial synopsis?",
+                ""
+            )
+            
+            if ok and feedback_text.strip():
+                # Always emit signal to start refinement process
+                self.adjust_signal.emit('synopsis', feedback_text)
+                if self.current_project:
+                    self.log_update.emit(f"Initial synopsis adjustment requested: {feedback_text[:100]}...")
+                # Disable initial synopsis buttons during refinement
+                if hasattr(self, 'initial_approve_button'):
+                    self.initial_approve_button.setEnabled(False)
+                if hasattr(self, 'initial_adjust_button'):
+                    self.initial_adjust_button.setEnabled(False)
+            return
+        
+        self.error_signal.emit("No synopsis content to adjust")
     
     def _on_approve_content(self, content_type):
         """Route approve signal to appropriate handler based on content type."""
+        self._write_app_log(f"User approved content: {content_type}")
         if content_type == 'synopsis':
             # Save progress: synopsis approved
             self._save_progress('synopsis', 'approved')
@@ -3942,33 +4481,76 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
     
     def _on_adjust_content(self, content_type, feedback):
         """Route adjust signal to appropriate handler based on content type."""
-        if content_type == 'synopsis':
-            # Synopsis adjustment via refinement
-            self.thread.refine_synopsis_with_feedback(content_type, feedback)
-        elif content_type == 'outline':
-            # Outline adjustment via refinement
-            self.thread.refine_outline_with_feedback(content_type, feedback)
-        elif content_type == 'characters':
-            # Characters adjustment via refinement
-            self.thread.refine_characters_with_feedback(content_type, feedback)
-        elif content_type == 'world':
-            # World adjustment via refinement
-            self.thread.refine_world_with_feedback(content_type, feedback)
-        elif content_type == 'timeline':
-            # Timeline adjustment via refinement
-            self.thread.refine_timeline_with_feedback(content_type, feedback)
-        elif content_type == 'section':
-            # Section adjustment via refinement
-            self.thread.refine_section_with_feedback(content_type, feedback)
+        self._write_app_log(f"User requested refinement for: {content_type} - Feedback: {feedback[:50]}...")
+        # Clear the appropriate display BEFORE starting refinement
+        if content_type == 'synopsis' and hasattr(self, 'planning_synopsis_display'):
+            self.planning_synopsis_display.clear()
+        elif content_type == 'outline' and hasattr(self, 'outline_display'):
+            self.outline_display.clear()
+        elif content_type == 'characters' and hasattr(self, 'characters_display'):
+            self.characters_display.clear()
+        elif content_type == 'world' and hasattr(self, 'world_display'):
+            self.world_display.clear()
+        elif content_type == 'timeline' and hasattr(self, 'timeline_display'):
+            self.timeline_display.clear()
+        elif content_type == 'section' and hasattr(self, 'draft_display'):
+            self.draft_display.clear()
+        
+        # Also clear expanded windows if open
+        display_names = {
+            'synopsis': 'planning_synopsis_display',
+            'outline': 'outline_display',
+            'characters': 'characters_display',
+            'world': 'world_display',
+            'timeline': 'timeline_display',
+            'section': 'draft_display'
+        }
+        
+        if content_type in display_names:
+            display_name = display_names[content_type]
+            if display_name in self.expanded_text_widgets:
+                self.expanded_text_widgets[display_name].clear()
+        
+        # For refinements on loaded content, we need to start the thread to execute the refinement
+        if not self.thread.isRunning():
+            # Thread is not running, so we need to store the refinement info and start the thread
+            self.thread.refinement_type = content_type  # type: ignore
+            self.thread.refinement_feedback = feedback  # type: ignore
+            self.thread.start_processing({'refinement': True, 'type': content_type, 'feedback': feedback})
+        else:
+            # Thread is already running (active generation), call refinement directly
+            if content_type == 'synopsis':
+                self.thread.refine_synopsis_with_feedback(content_type, feedback)
+            elif content_type == 'outline':
+                self.thread.refine_outline_with_feedback(content_type, feedback)
+            elif content_type == 'characters':
+                self.thread.refine_characters_with_feedback(content_type, feedback)
+            elif content_type == 'world':
+                self.thread.refine_world_with_feedback(content_type, feedback)
+            elif content_type == 'timeline':
+                self.thread.refine_timeline_with_feedback(content_type, feedback)
+            elif content_type == 'section':
+                self.thread.refine_section_with_feedback(content_type, feedback)
     
     def _on_approve_outline(self):
         """Handle Approve button click for outline - emit approve_signal with 'outline'."""
+        # Check if there's content in the outline display
+        if hasattr(self, 'outline_display'):
+            content = self.outline_display.toPlainText().strip()
+            if content and self.current_project:
+                self.current_project['outline'] = content
+        
         self.approve_signal.emit('outline')
         if self.current_project:
             self.log_update.emit("Outline approved. Ready to proceed with writing.")
     
     def _on_adjust_outline(self):
         """Handle Adjust button click for outline - get feedback and emit adjust_signal."""
+        # Check if there's content to adjust
+        if not hasattr(self, 'outline_display') or not self.outline_display.toPlainText().strip():
+            self.error_signal.emit("No outline content to adjust")
+            return
+        
         feedback_text, ok = QtWidgets.QInputDialog.getMultiLineText(
             self,
             "Adjust Outline",
@@ -3977,18 +4559,30 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         )
         
         if ok and feedback_text.strip():
+            # Always emit signal to start refinement process
             self.adjust_signal.emit('outline', feedback_text)
             if self.current_project:
                 self.log_update.emit(f"Outline adjustment requested: {feedback_text[:100]}...")
     
     def _on_approve_characters(self):
         """Handle Approve button click for characters - emit approve_signal with 'characters'."""
+        # Check if there's content in the characters display
+        if hasattr(self, 'characters_display'):
+            content = self.characters_display.toPlainText().strip()
+            if content and self.current_project:
+                self.current_project['characters'] = content
+        
         self.approve_signal.emit('characters')
         if self.current_project:
             self.log_update.emit("Characters approved. Ready for next phase.")
     
     def _on_adjust_characters(self):
         """Handle Adjust button click for characters - get feedback and emit adjust_signal."""
+        # Check if there's content to adjust
+        if not hasattr(self, 'characters_display') or not self.characters_display.toPlainText().strip():
+            self.error_signal.emit("No characters content to adjust")
+            return
+        
         feedback_text, ok = QtWidgets.QInputDialog.getMultiLineText(
             self,
             "Adjust Characters",
@@ -3997,18 +4591,30 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         )
         
         if ok and feedback_text.strip():
+            # Always emit signal to start refinement process
             self.adjust_signal.emit('characters', feedback_text)
             if self.current_project:
                 self.log_update.emit(f"Characters adjustment requested: {feedback_text[:100]}...")
     
     def _on_approve_world(self):
         """Handle Approve button click for world - emit approve_signal with 'world'."""
+        # Check if there's content in the world display
+        if hasattr(self, 'world_display'):
+            content = self.world_display.toPlainText().strip()
+            if content and self.current_project:
+                self.current_project['world'] = content
+        
         self.approve_signal.emit('world')
         if self.current_project:
             self.log_update.emit("World approved. Ready for next phase.")
     
     def _on_adjust_world(self):
         """Handle Adjust button click for world - get feedback and emit adjust_signal."""
+        # Check if there's content to adjust
+        if not hasattr(self, 'world_display') or not self.world_display.toPlainText().strip():
+            self.error_signal.emit("No world content to adjust")
+            return
+        
         feedback_text, ok = QtWidgets.QInputDialog.getMultiLineText(
             self,
             "Adjust World",
@@ -4017,12 +4623,19 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         )
         
         if ok and feedback_text.strip():
+            # Always emit signal to start refinement process
             self.adjust_signal.emit('world', feedback_text)
             if self.current_project:
                 self.log_update.emit(f"World adjustment requested: {feedback_text[:100]}...")
     
     def _on_approve_timeline(self):
         """Handle Approve button click for timeline - emit approve_signal with 'timeline'."""
+        # Check if there's content in the timeline display
+        if hasattr(self, 'timeline_display'):
+            content = self.timeline_display.toPlainText().strip()
+            if content and self.current_project:
+                self.current_project['timeline'] = content
+        
         self.approve_signal.emit('timeline')
         if self.current_project:
             self.log_update.emit("Timeline approved. Planning workflow complete.")
@@ -4034,6 +4647,11 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
     
     def _on_adjust_timeline(self):
         """Handle Adjust button click for timeline - get feedback and emit adjust_signal."""
+        # Check if there's content to adjust
+        if not hasattr(self, 'timeline_display') or not self.timeline_display.toPlainText().strip():
+            self.error_signal.emit("No timeline content to adjust")
+            return
+        
         feedback_text, ok = QtWidgets.QInputDialog.getMultiLineText(
             self,
             "Adjust Timeline",
@@ -4042,14 +4660,15 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         )
         
         if ok and feedback_text.strip():
+            # Always emit signal to start refinement process
             self.adjust_signal.emit('timeline', feedback_text)
             if self.current_project:
                 self.log_update.emit(f"Timeline adjustment requested: {feedback_text[:100]}...")
-            # Disable buttons during refinement
-            if hasattr(self, 'approve_timeline_button'):
-                self.approve_timeline_button.setEnabled(False)
-            if hasattr(self, 'adjust_timeline_button'):
-                self.adjust_timeline_button.setEnabled(False)
+                # Disable buttons during refinement
+                if hasattr(self, 'approve_timeline_button'):
+                    self.approve_timeline_button.setEnabled(False)
+                if hasattr(self, 'adjust_timeline_button'):
+                    self.adjust_timeline_button.setEnabled(False)
     
     def _expand_text_window(self, window_name):
         """Expand a text window to fill the entire planning tab."""
@@ -4071,30 +4690,44 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         expanded_text.setPlainText(text_widget.toPlainText())
         layout.addWidget(expanded_text)
         
+        # Store reference to expanded text widget for streaming updates
+        self.expanded_text_widgets[window_name] = expanded_text
+        
         # Add close button
         close_btn = QtWidgets.QPushButton("Close")
-        close_btn.clicked.connect(expand_dialog.accept)
+        close_btn.clicked.connect(lambda: self._on_expanded_window_close(window_name, expand_dialog))
         layout.addWidget(close_btn)
         
         expand_dialog.setLayout(layout)
         expand_dialog.exec_()
+    
+    def _on_expanded_window_close(self, window_name, dialog):
+        """Handle expanded window close - remove reference and close dialog."""
+        if window_name in self.expanded_text_widgets:
+            del self.expanded_text_widgets[window_name]
+        dialog.accept()
         
     def _on_create_project(self):
         """Handle project creation when button is clicked."""
         project_name = self.project_name_input.text().strip()
         
+        self._write_app_log(f"User initiated project creation: {project_name}")
+        
         if not project_name:
+            self._write_app_log(f"Project creation failed: empty name provided")
             self.initialization_status.setText("Error: Project name cannot be empty!")
             self.error_signal.emit("Project name is required")
             return
         
         try:
             self.create_project_structure(project_name)
+            self._write_app_log(f"Project '{project_name}' created successfully in projects folder")
             self.initialization_status.setText(f"✓ Project '{project_name}' created successfully!\n\nLocation: projects/{project_name}/")
             self.log_update.emit(f"Project '{project_name}' created")
             self.project_name_input.clear()
         except Exception as e:
             error_msg = f"Error creating project: {str(e)}"
+            self._write_app_log(f"Project creation failed for '{project_name}': {error_msg}")
             self.initialization_status.setText(error_msg)
             self.error_signal.emit(error_msg)
     
@@ -4112,10 +4745,7 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
                 self.llm_connected = True
                 
                 # Log success
-                log_entry = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - LLM connection successful (gemma3:12b)\n"
-                app_settings_file = os.path.join('Config', 'app_settings.txt')
-                with open(app_settings_file, 'a', encoding='utf-8') as f:
-                    f.write(log_entry)
+                self._write_app_log("LLM connection successful (gemma3:12b)")
                 
                 # Emit log if project is active
                 if self.current_project:
@@ -4126,10 +4756,7 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
             except Exception as e:
                 if attempt < max_retries:
                     # Log the failed attempt
-                    log_entry = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - LLM connection attempt {attempt} failed: {str(e)}. Retrying in {retry_delay}s...\n"
-                    app_settings_file = os.path.join('Config', 'app_settings.txt')
-                    with open(app_settings_file, 'a', encoding='utf-8') as f:
-                        f.write(log_entry)
+                    self._write_app_log(f"LLM connection attempt {attempt} failed: {str(e)}. Retrying in {retry_delay}s...")
                     
                     # Sleep before retry
                     threading.Event().wait(retry_delay)
@@ -4137,10 +4764,7 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
                     # All retries failed
                     self.llm_connected = False
                     error_msg = f"LLM connection failed after {max_retries} attempts: {str(e)}"
-                    log_entry = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {error_msg}\n"
-                    app_settings_file = os.path.join('Config', 'app_settings.txt')
-                    with open(app_settings_file, 'a', encoding='utf-8') as f:
-                        f.write(log_entry)
+                    self._write_app_log(error_msg)
                     
                     # Emit log if project is active
                     if self.current_project:
@@ -4160,6 +4784,52 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         if not os.path.exists(app_settings_file):
             with open(app_settings_file, 'w', encoding='utf-8') as f:
                 pass
+        
+        # Initialize rotating log system (log1.txt through log5.txt)
+        self._rotate_app_logs()
+    
+    def _rotate_app_logs(self):
+        """Rotate application logs using a 5-file system (log1.txt through log5.txt).
+        
+        On each startup, this method:
+        1. Determines which log file to use next (oldest/least recently modified)
+        2. Clears that log file (effectively reusing it)
+        3. Stores the current log file number for this session
+        
+        This keeps the log directory clean and prevents needing to scroll through
+        months/years of history when debugging current issues.
+        """
+        config_dir = 'Config'
+        log_files = [os.path.join(config_dir, f'log{i}.txt') for i in range(1, 6)]
+        
+        # Create all log files if they don't exist
+        for log_file in log_files:
+            if not os.path.exists(log_file):
+                with open(log_file, 'w', encoding='utf-8') as f:
+                    pass
+        
+        # Find the oldest log file (least recently modified)
+        oldest_log = min(log_files, key=lambda f: os.path.getmtime(f))
+        
+        # Clear the oldest log file for fresh session logging
+        with open(oldest_log, 'w', encoding='utf-8') as f:
+            pass
+        
+        # Store current log file path for this session
+        self.current_app_log = oldest_log
+        
+        # Touch the file to update modification time for next rotation
+        os.utime(oldest_log, None)
+    
+    def _write_app_log(self, message: str):
+        """Write message to current rotating app log file."""
+        try:
+            if hasattr(self, 'current_app_log'):
+                log_entry = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {message}\n"
+                with open(self.current_app_log, 'a', encoding='utf-8') as f:
+                    f.write(log_entry)
+        except Exception as e:
+            print(f"Failed to write to app log: {str(e)}")
     
     def create_project_structure(self, project_path):
         """Create project-specific files and folders. Call when a new project is created."""
@@ -4174,7 +4844,6 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         # List of project-specific files to create (empty)
         empty_files = [
             'story.txt',
-            'log.txt',
             'config.txt',
             'context.txt',
             'buffer_backup.txt'
@@ -4210,26 +4879,24 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         # Placeholders for backup files (not created yet)
         # story_backup.txt - placeholder
         # log_backup.txt - placeholder
-        
-        # Append initial log entry to log.txt
-        log_file = os.path.join(full_project_path, 'log.txt')
-        with open(log_file, 'a', encoding='utf-8') as f:
-            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            f.write(f'{timestamp} - Project initialized.\n')
+        # (project logs no longer created - all logging goes to Config/log1-5.txt)
     
     def load_project(self, project_name):
         """Load an existing project and store it in memory for persistence."""
+        self._write_app_log(f"Loading project: {project_name}")
         project_path = os.path.join('projects', project_name)
         
         if not os.path.exists(project_path):
+            self._write_app_log(f"Project load failed: path not found - {project_path}")
             raise FileNotFoundError(f"Project '{project_name}' not found at {project_path}")
         
         # Verify all required project files exist
-        required_files = ['story.txt', 'log.txt', 'config.txt', 'context.txt', 
+        required_files = ['story.txt', 'config.txt', 'context.txt', 
                          'characters.txt', 'world.txt', 'summaries.txt', 'buffer_backup.txt']
         for filename in required_files:
             filepath = os.path.join(project_path, filename)
             if not os.path.exists(filepath):
+                self._write_app_log(f"Project load failed: missing file - {filename}")
                 raise FileNotFoundError(f"Project file missing: {filename}")
         
         # Load and store project data in memory
@@ -4237,7 +4904,6 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
             'name': project_name,
             'path': project_path,
             'story': self._read_file(os.path.join(project_path, 'story.txt')),
-            'log': self._read_file(os.path.join(project_path, 'log.txt')),
             'config': self._read_file(os.path.join(project_path, 'config.txt')),
             'context': self._read_file(os.path.join(project_path, 'context.txt')),
             'characters': self._read_file(os.path.join(project_path, 'characters.txt')),
@@ -4258,6 +4924,11 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         # Load progress tracking if it exists
         self._load_progress()
         
+        # Populate planning tab displays with existing project data
+        self._populate_planning_displays()
+        
+        self._write_app_log(f"Project loaded successfully: {project_name} - session persistence enabled")
+        return self.current_project
         return self.current_project
     
     def _save_progress(self, stage, status):
@@ -4303,6 +4974,149 @@ AutoApproval: {self.autoapproval_checkbox.isChecked()}
         except (FileNotFoundError, json.JSONDecodeError):
             self.current_project['progress'] = {}
             return {}
+    
+    def _populate_planning_displays(self):
+        """Populate planning tab displays with existing project data from project files."""
+        if not self.current_project:
+            return
+        
+        # Load initial synopsis from synopsis.txt if it exists
+        synopsis_file = os.path.join(self.current_project['path'], 'synopsis.txt')
+        has_initial_synopsis = False
+        if os.path.exists(synopsis_file):
+            try:
+                with open(synopsis_file, 'r', encoding='utf-8') as f:
+                    synopsis_content = f.read().strip()
+                
+                if synopsis_content and hasattr(self, 'synopsis_display'):
+                    self.synopsis_display.setText(synopsis_content)
+                    has_initial_synopsis = True
+            except Exception as e:
+                self.log_update.emit(f"Failed to load initial synopsis: {str(e)}")
+        
+        # Load refined synopsis from refined_synopsis.txt if it exists
+        refined_synopsis_file = os.path.join(self.current_project['path'], 'refined_synopsis.txt')
+        has_refined_synopsis = False
+        refined_synopsis_content = ""
+        if os.path.exists(refined_synopsis_file):
+            try:
+                with open(refined_synopsis_file, 'r', encoding='utf-8') as f:
+                    refined_synopsis_content = f.read().strip()
+                
+                if refined_synopsis_content and hasattr(self, 'planning_synopsis_display'):
+                    self.planning_synopsis_display.setText(refined_synopsis_content)
+                    has_refined_synopsis = True
+            except Exception as e:
+                self.log_update.emit(f"Failed to load refined synopsis: {str(e)}")
+        
+        # Sync synopsis to background thread for refinement operations
+        # Use refined synopsis if available, otherwise use initial synopsis
+        if refined_synopsis_content:
+            self.thread.synopsis = refined_synopsis_content
+        elif synopsis_content and has_initial_synopsis:
+            self.thread.synopsis = synopsis_content
+        
+        # Enable synopsis buttons if content is loaded
+        if has_initial_synopsis:
+            if hasattr(self, 'initial_approve_button'):
+                self.initial_approve_button.setEnabled(True)
+            if hasattr(self, 'initial_adjust_button'):
+                self.initial_adjust_button.setEnabled(True)
+        
+        if has_refined_synopsis:
+            if hasattr(self, 'approve_button'):
+                self.approve_button.setEnabled(True)
+            if hasattr(self, 'adjust_button'):
+                self.adjust_button.setEnabled(True)
+        
+        # Check for outline.txt file (indicates outline was generated)
+        outline_file = os.path.join(self.current_project['path'], 'outline.txt')
+        has_outline = False
+        if os.path.exists(outline_file):
+            try:
+                with open(outline_file, 'r', encoding='utf-8') as f:
+                    outline_content = f.read()
+                if outline_content.strip() and hasattr(self, 'outline_display'):
+                    self.outline_display.setText(outline_content)
+                    has_outline = True
+            except Exception as e:
+                self.log_update.emit(f"Failed to load outline: {str(e)}")
+        
+        # Enable outline buttons if content is loaded
+        if has_outline:
+            if hasattr(self, 'approve_outline_button'):
+                self.approve_outline_button.setEnabled(True)
+            if hasattr(self, 'adjust_outline_button'):
+                self.adjust_outline_button.setEnabled(True)
+        
+        # Load characters if available
+        has_characters = False
+        if self.current_project.get('characters', ''):
+            if hasattr(self, 'characters_display'):
+                try:
+                    import json as json_module
+                    # Try to parse and format as JSON
+                    characters_data = json_module.loads(self.current_project['characters'])
+                    formatted = json_module.dumps(characters_data, indent=2, ensure_ascii=False)
+                    self.characters_display.setText(formatted)
+                    has_characters = True
+                except (json_module.JSONDecodeError, ValueError):
+                    # If not JSON, display as plain text
+                    self.characters_display.setText(self.current_project['characters'])
+                    has_characters = True
+        
+        # Enable characters buttons if content is loaded
+        if has_characters:
+            if hasattr(self, 'approve_characters_button'):
+                self.approve_characters_button.setEnabled(True)
+            if hasattr(self, 'adjust_characters_button'):
+                self.adjust_characters_button.setEnabled(True)
+        
+        # Load world if available
+        has_world = False
+        if self.current_project.get('world', ''):
+            if hasattr(self, 'world_display'):
+                try:
+                    import json as json_module
+                    # Try to parse and format as JSON
+                    world_data = json_module.loads(self.current_project['world'])
+                    formatted = json_module.dumps(world_data, indent=2, ensure_ascii=False)
+                    self.world_display.setText(formatted)
+                    has_world = True
+                except (json_module.JSONDecodeError, ValueError):
+                    # If not JSON, display as plain text
+                    self.world_display.setText(self.current_project['world'])
+                    has_world = True
+        
+        # Enable world buttons if content is loaded
+        if has_world:
+            if hasattr(self, 'approve_world_button'):
+                self.approve_world_button.setEnabled(True)
+            if hasattr(self, 'adjust_world_button'):
+                self.adjust_world_button.setEnabled(True)
+        
+        # Load timeline if available
+        has_timeline = False
+        timeline_file = os.path.join(self.current_project['path'], 'timeline.txt')
+        if os.path.exists(timeline_file):
+            try:
+                with open(timeline_file, 'r', encoding='utf-8') as f:
+                    timeline_content = f.read()
+                if timeline_content.strip() and hasattr(self, 'timeline_display'):
+                    self.timeline_display.setText(timeline_content)
+                    has_timeline = True
+            except Exception as e:
+                self.log_update.emit(f"Failed to load timeline: {str(e)}")
+        
+        # Enable timeline buttons if content is loaded
+        if has_timeline:
+            if hasattr(self, 'approve_timeline_button'):
+                self.approve_timeline_button.setEnabled(True)
+            if hasattr(self, 'adjust_timeline_button'):
+                self.adjust_timeline_button.setEnabled(True)
+        
+        # Log that displays were populated
+        self.log_update.emit("Planning displays populated with existing project data")
     
     def get_stage_status(self, stage):
         """Get the current status of a generation stage. Returns None if not completed."""

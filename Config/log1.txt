@@ -1,0 +1,8 @@
+2025-11-20 22:30:29 - User initiated project load: Test 1
+2025-11-20 22:30:29 - Loading project: Test 1
+2025-11-20 22:30:29 - Project load failed: missing file - log.txt
+2025-11-20 22:30:29 - Project load failed for 'Test 1': Error loading project: Project file missing: log.txt
+2025-11-20 22:30:34 - User initiated project load: Test 1
+2025-11-20 22:30:34 - Loading project: Test 1
+2025-11-20 22:30:34 - Project load failed: missing file - log.txt
+2025-11-20 22:30:34 - Project load failed for 'Test 1': Error loading project: Project file missing: log.txt
